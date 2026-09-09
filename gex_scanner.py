@@ -11,10 +11,20 @@ Native usage:
 NOTE: Signal thresholds, tier base scores, and the GEX bonus weight are
 hand-set, not fitted. Nothing here has been validated against forward
 returns. Treat the ranking as a triage view, not a tested edge.
+
+Yahoo calls (history, fast_info, calendar, options, option_chain) retry with
+exponential backoff instead of giving up on the first error, since most
+failures seen in practice are transient rate-limiting. Price/OHLCV history
+additionally falls back to Stooq (a separate, keyless data source) when
+Yahoo has none for a symbol after retries -- logged as "[stooq] SYMBOL:
+history backfilled from Stooq", so a fallback-served scan is visible in the
+run log rather than silently indistinguishable from a normal one.
 """
 
 import os
 import time
+from io import StringIO
+
 import numpy as np
 import pandas as pd
 import requests
@@ -38,6 +48,64 @@ def notify_ntfy(title: str, message: str) -> None:
         )
     except requests.RequestException as exc:
         print(f"[notify] Failed to send ntfy push: {exc}")
+
+
+def with_retries(fn, *args, retries=3, base_delay=1.0, label="", **kwargs):
+    """Call fn(*args, **kwargs) with exponential backoff. Returns None if every attempt fails.
+
+    Most Yahoo fetch failures we've hit in practice are transient rate-limiting
+    (a "cookie/crumb" fetch error, a bare 403) rather than the symbol having no
+    data, so a short retry clears most of them before falling through to a
+    weaker fallback or giving up.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            tag = label or getattr(fn, "__name__", "call")
+            if attempt == retries:
+                print(f"[retry] {tag} failed after {retries} attempts: {exc}")
+                return None
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f"[retry] {tag} attempt {attempt} failed ({exc}); retrying in {delay:.0f}s")
+            time.sleep(delay)
+    return None
+
+
+# Daily OHLCV from Stooq: no API key, separate infra from Yahoo, so it isn't
+# affected by Yahoo rate-limiting/blocking. Used as a last-resort fallback
+# when Yahoo has no price history for a symbol after retries.
+STOOQ_HISTORY_DAYS = 1150   # calendar days; comfortably covers the "3y" history this scanner uses
+
+
+def fetch_stooq_history(ticker, days=STOOQ_HISTORY_DAYS):
+    """Daily OHLCV from Stooq, shaped like yfinance's Ticker.history() output
+    (Open/High/Low/Close/Volume, indexed by date). Returns None on any
+    failure so callers can flag/log the fallback rather than fabricate data."""
+    sym = f"{ticker.lower()}.us"
+    try:
+        resp = requests.get(f"https://stooq.com/q/d/l/?s={sym}&i=d", timeout=10)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        print(f"[stooq] {ticker}: request failed ({exc})")
+        return None
+
+    text = resp.text.strip()
+    if not text or "Date" not in text.splitlines()[0]:
+        return None   # Stooq returns a plain "No data" body for unknown symbols
+
+    try:
+        df = pd.read_csv(StringIO(text), parse_dates=["Date"])
+    except Exception as exc:
+        print(f"[stooq] {ticker}: parse failed ({exc})")
+        return None
+
+    keep = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in df.columns]
+    if df.empty or len(keep) < 5:
+        return None
+
+    df = df.set_index("Date").sort_index()[keep].astype(float)
+    return df.tail(days) if len(df) > days else df
 
 
 # ==========================================
@@ -103,7 +171,15 @@ class TickerCacheManager:
 
         time.sleep(0.02)
         t = self.get_ticker(symbol)
-        df = t.history(period=period, auto_adjust=auto_adjust)
+        df = with_retries(lambda: t.history(period=period, auto_adjust=auto_adjust),
+                          label=f"{symbol} history")
+        if df is None or df.empty:
+            fallback = fetch_stooq_history(symbol)
+            if fallback is not None and not fallback.empty:
+                print(f"[stooq] {symbol}: history backfilled from Stooq ({len(fallback)} rows)")
+                df = fallback
+            else:
+                df = pd.DataFrame()
         self.history_cache[key] = (now, df)
         return df
 
@@ -118,12 +194,16 @@ class TickerCacheManager:
         time.sleep(0.02)
         t = self.get_ticker(symbol)
         price = np.nan
-        try:
+
+        def _fast_price():
             p = t.fast_info['last_price']
-            if p is not None and np.isfinite(p) and p > 0:
-                price = float(p)
-        except Exception:
-            pass
+            if p is None or not np.isfinite(p) or p <= 0:
+                raise ValueError("no usable last_price")
+            return float(p)
+
+        fast_price = with_retries(_fast_price, label=f"{symbol} fast_info.last_price")
+        if fast_price is not None:
+            price = fast_price
 
         if np.isnan(price):
             hist = self.get_history(symbol, period="3y", auto_adjust=False)
@@ -180,11 +260,7 @@ class TickerCacheManager:
         time.sleep(0.02)
         t = self.get_ticker(symbol)
 
-        fi = None
-        try:
-            fi = t.fast_info
-        except Exception:
-            fi = None
+        fi = with_retries(lambda: t.fast_info, label=f"{symbol} fast_info")
 
         mcap = self._read_field(fi, ("market_cap", "marketCap"))
 
@@ -198,12 +274,9 @@ class TickerCacheManager:
 
         # Fallback 2: the slow .info payload
         if np.isnan(mcap):
-            try:
-                info = t.get_info()
-                if isinstance(info, dict):
-                    mcap = self._coerce_positive(info.get('marketCap'))
-            except Exception:
-                mcap = np.nan
+            info = with_retries(lambda: t.get_info(), label=f"{symbol} get_info")
+            if isinstance(info, dict):
+                mcap = self._coerce_positive(info.get('marketCap'))
 
         if not np.isnan(mcap):
             self.mcap_cache[symbol] = (now, mcap)
@@ -226,32 +299,35 @@ class TickerCacheManager:
         time.sleep(0.02)
         t = self.get_ticker(symbol)
         status = "UNKNOWN"
-        try:
-            cal = t.calendar
-            edates = []
-            if isinstance(cal, pd.DataFrame):
-                if 'Earnings Date' in cal.index:
-                    edates = cal.loc['Earnings Date'].values
-                elif 'Earnings Date' in cal.columns:
-                    edates = cal['Earnings Date'].values
-            elif isinstance(cal, dict):
-                if 'Earnings Date' in cal:
-                    edates = cal['Earnings Date']
+        cal = with_retries(lambda: t.calendar, label=f"{symbol} calendar")
+        # cal stays None only if every retry raised; that's a failed check,
+        # not evidence of "no earnings" -- must not fall through to status=False.
+        if cal is not None:
+            try:
+                edates = []
+                if isinstance(cal, pd.DataFrame):
+                    if 'Earnings Date' in cal.index:
+                        edates = cal.loc['Earnings Date'].values
+                    elif 'Earnings Date' in cal.columns:
+                        edates = cal['Earnings Date'].values
+                elif isinstance(cal, dict):
+                    if 'Earnings Date' in cal:
+                        edates = cal['Earnings Date']
 
-            if edates is not None and len(edates) > 0:
-                today = pd.Timestamp.now().floor('D')
-                is_near = False
-                for ed in edates:
-                    ed_dt = pd.to_datetime(ed).floor('D')
-                    days_diff = (ed_dt - today).days
-                    if 0 <= days_diff <= days_threshold:
-                        is_near = True
-                        break
-                status = is_near
-            else:
-                status = False
-        except Exception:
-            status = "UNKNOWN"
+                if edates is not None and len(edates) > 0:
+                    today = pd.Timestamp.now().floor('D')
+                    is_near = False
+                    for ed in edates:
+                        ed_dt = pd.to_datetime(ed).floor('D')
+                        days_diff = (ed_dt - today).days
+                        if 0 <= days_diff <= days_threshold:
+                            is_near = True
+                            break
+                    status = is_near
+                else:
+                    status = False
+            except Exception:
+                status = "UNKNOWN"
 
         self.earnings_cache[symbol] = (now, status)
         return status
@@ -265,11 +341,7 @@ class TickerCacheManager:
                 return df
 
         t = self.get_ticker(symbol)
-        try:
-            expirations = t.options
-        except Exception:
-            return pd.DataFrame()
-
+        expirations = with_retries(lambda: t.options, label=f"{symbol} options")
         if not expirations:
             return pd.DataFrame()
 
@@ -285,19 +357,19 @@ class TickerCacheManager:
 
         chains = []
         for exp, dte in valid_expirations:
-            try:
-                time.sleep(0.04)
-                opt = t.option_chain(exp)
-                for opt_type, df_opt in [('call', opt.calls), ('put', opt.puts)]:
-                    if df_opt is None or df_opt.empty:
-                        continue
-                    df_c = df_opt.copy()
-                    df_c['type'] = opt_type
-                    df_c['expiration'] = exp
-                    df_c['dte'] = dte
-                    chains.append(df_c)
-            except Exception:
+            time.sleep(0.04)
+            opt = with_retries(lambda: t.option_chain(exp), retries=2, base_delay=1.0,
+                               label=f"{symbol} option_chain {exp}")
+            if opt is None:
                 continue
+            for opt_type, df_opt in [('call', opt.calls), ('put', opt.puts)]:
+                if df_opt is None or df_opt.empty:
+                    continue
+                df_c = df_opt.copy()
+                df_c['type'] = opt_type
+                df_c['expiration'] = exp
+                df_c['dte'] = dte
+                chains.append(df_c)
 
         df_all = pd.concat(chains, ignore_index=True) if chains else pd.DataFrame()
         self.chain_cache[symbol] = (now, df_all)
