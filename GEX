@@ -1,0 +1,884 @@
+!pip install yfinance numpy pandas scipy --quiet
+
+"""
+Institutional Options Entry & GEX Execution Engine
+--------------------------------------------------
+Black-Scholes gamma exposure scanner with signal classification,
+cross-sectional ranking, and spread strike construction.
+
+Colab usage:
+    Paste this whole file into one cell and run. The leading !pip line is
+    Colab/IPython syntax, not Python -- running this file with `python
+    gex_scanner.py` will fail on it. Delete that line to run outside a notebook.
+
+NOTE: Signal thresholds, tier base scores, and the GEX bonus weight are
+hand-set, not fitted. Nothing here has been validated against forward
+returns. Treat the ranking as a triage view, not a tested edge.
+"""
+
+import time
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from scipy.stats import norm
+from typing import Dict, Tuple, List, Union
+
+
+# ==========================================
+# 1. VECTORIZED BLACK-SCHOLES GAMMA ENGINE
+# ==========================================
+def calculate_vectorized_bs_gamma(
+    S: float,
+    K_array: np.ndarray,
+    T_array: np.ndarray,
+    r: float,
+    sigma_array: np.ndarray
+) -> np.ndarray:
+    """Vectorized computation of Black-Scholes Gamma."""
+    mask = (T_array > 0.0001) & (sigma_array > 0.001) & (S > 0) & (K_array > 0)
+    gamma = np.zeros_like(K_array, dtype=float)
+
+    if not np.any(mask):
+        return gamma
+
+    S_m = S
+    K_m = K_array[mask]
+    T_m = T_array[mask]
+    sig_m = sigma_array[mask]
+
+    sqrt_T = np.sqrt(T_m)
+    d1 = (np.log(S_m / K_m) + (r + 0.5 * sig_m**2) * T_m) / (sig_m * sqrt_T)
+
+    pdf_d1 = norm.pdf(d1)
+    gamma[mask] = pdf_d1 / (S_m * sig_m * sqrt_T)
+
+    return np.nan_to_num(gamma, nan=0.0)
+
+
+# ==========================================
+# 2. CACHING & DATA MANAGER
+# ==========================================
+class TickerCacheManager:
+    """Centralized cache managing rate limits, spot prices, market caps, and option chains."""
+
+    def __init__(self, cache_ttl_seconds: int = 300, spot_ttl_seconds: int = 30):
+        self.ttl = cache_ttl_seconds
+        self.spot_ttl = spot_ttl_seconds
+        self.tickers: Dict[str, yf.Ticker] = {}
+        self.chain_cache: Dict[str, Tuple[float, pd.DataFrame]] = {}
+        self.history_cache: Dict[str, Tuple[float, pd.DataFrame]] = {}
+        self.earnings_cache: Dict[str, Tuple[float, Union[bool, str]]] = {}
+        self.spot_cache: Dict[str, Tuple[float, float]] = {}
+        self.mcap_cache: Dict[str, Tuple[float, float]] = {}
+
+    def get_ticker(self, symbol: str) -> yf.Ticker:
+        if symbol not in self.tickers:
+            self.tickers[symbol] = yf.Ticker(symbol)
+        return self.tickers[symbol]
+
+    def get_history(self, symbol: str, period: str = "3y", auto_adjust: bool = False) -> pd.DataFrame:
+        """Pulls historical price data (unadjusted by default for level comparability with spot)."""
+        now = time.time()
+        key = f"{symbol}_{period}_{auto_adjust}"
+        if key in self.history_cache:
+            ts, df = self.history_cache[key]
+            if now - ts < self.ttl:
+                return df
+
+        time.sleep(0.02)
+        t = self.get_ticker(symbol)
+        df = t.history(period=period, auto_adjust=auto_adjust)
+        self.history_cache[key] = (now, df)
+        return df
+
+    def get_spot_price(self, symbol: str) -> float:
+        """Pulls unadjusted spot price with a short TTL cache."""
+        now = time.time()
+        if symbol in self.spot_cache:
+            ts, price = self.spot_cache[symbol]
+            if now - ts < self.spot_ttl:
+                return price
+
+        time.sleep(0.02)
+        t = self.get_ticker(symbol)
+        price = np.nan
+        try:
+            p = t.fast_info['last_price']
+            if p is not None and np.isfinite(p) and p > 0:
+                price = float(p)
+        except Exception:
+            pass
+
+        if np.isnan(price):
+            hist = self.get_history(symbol, period="3y", auto_adjust=False)
+            if not hist.empty:
+                price = float(hist['Close'].iloc[-1])
+
+        if not np.isnan(price):
+            self.spot_cache[symbol] = (now, price)
+
+        return price
+
+    @staticmethod
+    def _coerce_positive(value) -> float:
+        """Returns a positive float or NaN. Tolerates None, strings, numpy scalars."""
+        if value is None:
+            return np.nan
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return np.nan
+        return v if np.isfinite(v) and v > 0 else np.nan
+
+    def _read_field(self, obj, keys) -> float:
+        """Try mapping access then attribute access for each candidate key."""
+        if obj is None:
+            return np.nan
+        for key in keys:
+            for accessor in (
+                lambda: obj[key],
+                lambda: getattr(obj, key),
+            ):
+                try:
+                    v = self._coerce_positive(accessor())
+                except Exception:
+                    continue
+                if not np.isnan(v):
+                    return v
+        return np.nan
+
+    def get_market_cap(self, symbol: str) -> float:
+        """
+        Pulls market cap with TTL caching. Returns NaN when genuinely unavailable.
+
+        fast_info's interface has shifted across yfinance versions (Mapping vs
+        plain object, snake_case vs camelCase), so try several paths before
+        falling back to shares * spot, then to the slow .info payload.
+        """
+        now = time.time()
+        if symbol in self.mcap_cache:
+            ts, mcap = self.mcap_cache[symbol]
+            if now - ts < self.ttl:
+                return mcap
+
+        time.sleep(0.02)
+        t = self.get_ticker(symbol)
+
+        fi = None
+        try:
+            fi = t.fast_info
+        except Exception:
+            fi = None
+
+        mcap = self._read_field(fi, ("market_cap", "marketCap"))
+
+        # Fallback 1: shares outstanding * spot price
+        if np.isnan(mcap):
+            shares = self._read_field(fi, ("shares", "shares_outstanding", "sharesOutstanding"))
+            if not np.isnan(shares):
+                spot = self.get_spot_price(symbol)
+                if not np.isnan(spot) and spot > 0:
+                    mcap = shares * spot
+
+        # Fallback 2: the slow .info payload
+        if np.isnan(mcap):
+            try:
+                info = t.get_info()
+                if isinstance(info, dict):
+                    mcap = self._coerce_positive(info.get('marketCap'))
+            except Exception:
+                mcap = np.nan
+
+        if not np.isnan(mcap):
+            self.mcap_cache[symbol] = (now, mcap)
+
+        return mcap
+
+    def check_earnings_status(self, symbol: str, days_threshold: int = 7) -> Union[bool, str]:
+        """
+        Tri-state earnings check.
+        True    -> earnings inside the window
+        False   -> confirmed clear
+        UNKNOWN -> calendar check failed; caller must not treat as clear
+        """
+        now = time.time()
+        if symbol in self.earnings_cache:
+            ts, status = self.earnings_cache[symbol]
+            if now - ts < self.ttl * 4:
+                return status
+
+        time.sleep(0.02)
+        t = self.get_ticker(symbol)
+        status = "UNKNOWN"
+        try:
+            cal = t.calendar
+            edates = []
+            if isinstance(cal, pd.DataFrame):
+                if 'Earnings Date' in cal.index:
+                    edates = cal.loc['Earnings Date'].values
+                elif 'Earnings Date' in cal.columns:
+                    edates = cal['Earnings Date'].values
+            elif isinstance(cal, dict):
+                if 'Earnings Date' in cal:
+                    edates = cal['Earnings Date']
+
+            if edates is not None and len(edates) > 0:
+                today = pd.Timestamp.now().floor('D')
+                is_near = False
+                for ed in edates:
+                    ed_dt = pd.to_datetime(ed).floor('D')
+                    days_diff = (ed_dt - today).days
+                    if 0 <= days_diff <= days_threshold:
+                        is_near = True
+                        break
+                status = is_near
+            else:
+                status = False
+        except Exception:
+            status = "UNKNOWN"
+
+        self.earnings_cache[symbol] = (now, status)
+        return status
+
+    def get_options_chain_within_dte(self, symbol: str, max_dte: int = 45) -> pd.DataFrame:
+        """Pulls option chains with per-request sleep throttling."""
+        now = time.time()
+        if symbol in self.chain_cache:
+            ts, df = self.chain_cache[symbol]
+            if now - ts < self.ttl:
+                return df
+
+        t = self.get_ticker(symbol)
+        try:
+            expirations = t.options
+        except Exception:
+            return pd.DataFrame()
+
+        if not expirations:
+            return pd.DataFrame()
+
+        today = pd.Timestamp.now().floor('D')
+        valid_expirations = []
+        for exp in expirations:
+            try:
+                dte = (pd.to_datetime(exp) - today).days
+                if 0 <= dte <= max_dte:
+                    valid_expirations.append((exp, dte))
+            except Exception:
+                continue
+
+        chains = []
+        for exp, dte in valid_expirations:
+            try:
+                time.sleep(0.04)
+                opt = t.option_chain(exp)
+                for opt_type, df_opt in [('call', opt.calls), ('put', opt.puts)]:
+                    if df_opt is None or df_opt.empty:
+                        continue
+                    df_c = df_opt.copy()
+                    df_c['type'] = opt_type
+                    df_c['expiration'] = exp
+                    df_c['dte'] = dte
+                    chains.append(df_c)
+            except Exception:
+                continue
+
+        df_all = pd.concat(chains, ignore_index=True) if chains else pd.DataFrame()
+        self.chain_cache[symbol] = (now, df_all)
+        return df_all
+
+
+cache = TickerCacheManager(cache_ttl_seconds=300, spot_ttl_seconds=30)
+
+
+# ==========================================
+# 3. TECHNICAL INDICATORS
+# ==========================================
+def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if len(df) < 200:
+        return df
+
+    df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
+
+    delta = df['Close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(alpha=1 / 14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, adjust=False).mean()
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs = np.where(avg_loss == 0, np.inf, avg_gain / avg_loss)
+        df['RSI'] = np.where(avg_loss == 0, 100.0, 100.0 - (100.0 / (1.0 + rs)))
+
+    return df
+
+
+# ==========================================
+# 4. GEX & WALL ENGINE
+# ==========================================
+# Maximum fractional distance from spot at which a strike can qualify as a wall.
+# Tunable: too tight and the wall is just the nearest strike; too loose and it
+# becomes a far-OTM round number with no bearing on near-term price action.
+WALL_MAX_DIST_DEFAULT = 0.12
+
+
+def calculate_gex_and_walls(symbol: str, r: float = 0.045) -> Tuple[float, float, str, float, float, float, float]:
+    """
+    Returns: (gex_1pct_m, gex_rel_bps, regime, call_wall, put_wall, gamma_flip, curr_price)
+
+    gex_rel_bps is NaN when the market-cap lookup fails, so the ranking layer can
+    substitute a neutral percentile instead of scoring the name as weak.
+    """
+    try:
+        curr_price = cache.get_spot_price(symbol)
+        if np.isnan(curr_price) or curr_price <= 0:
+            return (np.nan, np.nan, "NO_DATA", np.nan, np.nan, np.nan, np.nan)
+
+        chain = cache.get_options_chain_within_dte(symbol, max_dte=45)
+        if chain.empty:
+            return (np.nan, np.nan, "NO_DATA", np.nan, np.nan, np.nan, curr_price)
+
+        chain['openInterest'] = pd.to_numeric(chain['openInterest'], errors='coerce').fillna(0)
+        chain['impliedVolatility'] = pd.to_numeric(chain['impliedVolatility'], errors='coerce').fillna(0)
+        chain['strike'] = pd.to_numeric(chain['strike'], errors='coerce').fillna(0)
+
+        min_strike = curr_price * 0.70
+        max_strike = curr_price * 1.30
+        valid_chain = chain[
+            (chain['strike'] >= min_strike) &
+            (chain['strike'] <= max_strike) &
+            (chain['openInterest'] >= 5) &
+            (chain['impliedVolatility'] > 0.001)
+        ].copy()
+
+        if valid_chain.empty:
+            return (np.nan, np.nan, "NO_DATA", np.nan, np.nan, np.nan, curr_price)
+
+        T_arr = np.maximum(valid_chain['dte'].values, 0.5) / 365.0
+        K_arr = valid_chain['strike'].values
+        sig_arr = valid_chain['impliedVolatility'].values
+
+        gammas = calculate_vectorized_bs_gamma(curr_price, K_arr, T_arr, r, sig_arr)
+        valid_chain['bs_gamma'] = gammas
+
+        # Dollar gamma per 1% move, in $ millions
+        valid_chain['raw_gex'] = (
+            valid_chain['bs_gamma'] * valid_chain['openInterest'] * 100.0
+            * (curr_price ** 2) * 0.01 * 1e-6
+        )
+        valid_chain['signed_gex'] = np.where(
+            valid_chain['type'] == 'call', valid_chain['raw_gex'], -valid_chain['raw_gex']
+        )
+
+        # Walls come from OPEN INTEREST, constrained by side and distance.
+        #
+        # Two failure modes to avoid:
+        #   - Gamma-weighted argmax peaks at the money, so the "wall" collapses to
+        #     whichever strike is nearest spot -- a moneyness artifact.
+        #   - Raw OI argmax over a wide window finds the most popular strike, which
+        #     is a far-OTM round number (lottery calls), too distant to trade against.
+        #
+        # So: call wall is the heaviest call OI at or above spot, put wall the
+        # heaviest put OI at or below spot, both within WALL_MAX_DIST of spot.
+        # Un-netted by side so a strike heavy in both doesn't cancel itself out.
+        #
+        # CAVEAT: for names whose true OI peak lies beyond the window, the chosen
+        # wall lands on the band edge -- that is the constraint binding, not a real
+        # cluster. Widening WALL_MAX_DIST re-admits the lottery strikes. There is no
+        # correct value; treat a wall within one strike of the edge with suspicion.
+        WALL_MAX_DIST = WALL_MAX_DIST_DEFAULT
+
+        calls = valid_chain[valid_chain['type'] == 'call']
+        puts = valid_chain[valid_chain['type'] == 'put']
+
+        call_side = calls[
+            (calls['strike'] >= curr_price) &
+            (calls['strike'] <= curr_price * (1.0 + WALL_MAX_DIST))
+        ]
+        put_side = puts[
+            (puts['strike'] <= curr_price) &
+            (puts['strike'] >= curr_price * (1.0 - WALL_MAX_DIST))
+        ]
+
+        call_oi = call_side.groupby('strike')['openInterest'].sum()
+        put_oi = put_side.groupby('strike')['openInterest'].sum()
+
+        call_wall = float(call_oi.idxmax()) if not call_oi.empty else np.nan
+        put_wall = float(put_oi.idxmax()) if not put_oi.empty else np.nan
+
+        # Gamma flip: spot price at which net dealer gamma changes sign.
+        # See compute_gamma_flip for why this is not a cumulative sum over strikes.
+        net_gex_by_strike = valid_chain.groupby('strike')['signed_gex'].sum().sort_index()
+
+        gamma_flip = compute_gamma_flip(
+            curr_price,
+            K_arr,
+            T_arr,
+            sig_arr,
+            valid_chain['openInterest'].values,
+            (valid_chain['type'] == 'call').values,
+            r,
+        )
+
+        total_net_gex_m = float(net_gex_by_strike.sum())
+        regime = "POSITIVE_GEX" if total_net_gex_m >= 0 else "NEGATIVE_GEX"
+
+        # FIX: NaN (not 0.0) when market cap is unavailable
+        mcap = cache.get_market_cap(symbol)
+        if not np.isnan(mcap) and mcap > 0:
+            gex_rel_bps = float(((total_net_gex_m * 1e6) / mcap) * 10000.0)
+        else:
+            gex_rel_bps = np.nan
+
+        return (total_net_gex_m, gex_rel_bps, regime, call_wall, put_wall, gamma_flip, curr_price)
+
+    except Exception:
+        return (np.nan, np.nan, "NO_DATA", np.nan, np.nan, np.nan, np.nan)
+
+
+def compute_gamma_flip(
+    curr_price: float,
+    K_arr: np.ndarray,
+    T_arr: np.ndarray,
+    sig_arr: np.ndarray,
+    oi_arr: np.ndarray,
+    is_call: np.ndarray,
+    r: float,
+    lo: float = 0.80,
+    hi: float = 1.20,
+    n_grid: int = 121,
+) -> float:
+    """
+    Spot price at which total dealer gamma exposure changes sign.
+
+    Computed by sweeping hypothetical spot prices and recomputing every contract's
+    gamma at each, holding OI and IV fixed.
+
+    This replaces the common cumulative-sum-across-strikes approximation, which
+    accumulates from the bottom of the strike filter rather than from zero. That
+    makes its crossing point a function of where the filter truncates -- move the
+    window from 0.7x to 0.8x and the reported flip moves with it. The sweep has no
+    such dependence: it asks "at what spot does net gamma turn negative", which is
+    the quantity the flip is supposed to name.
+
+    Caveat: holding IV fixed while spot moves is a simplification. Real IV shifts
+    along the skew as price moves, so treat the level as approximate.
+    """
+    if len(K_arr) == 0 or not np.isfinite(curr_price) or curr_price <= 0:
+        return np.nan
+
+    grid = np.linspace(curr_price * lo, curr_price * hi, n_grid)
+
+    # (n_grid, n_contracts) broadcast
+    S = grid[:, None]
+    K = K_arr[None, :]
+    T = T_arr[None, :]
+    sig = sig_arr[None, :]
+
+    valid = (T > 0.0001) & (sig > 0.001) & (K > 0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        sqrt_T = np.sqrt(T)
+        d1 = (np.log(S / K) + (r + 0.5 * sig ** 2) * T) / (sig * sqrt_T)
+        gamma = norm.pdf(d1) / (S * sig * sqrt_T)
+    gamma = np.where(valid, np.nan_to_num(gamma, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+
+    gex = gamma * oi_arr[None, :] * 100.0 * (S ** 2) * 0.01 * 1e-6
+    signed = np.where(is_call[None, :], gex, -gex)
+    totals = signed.sum(axis=1)
+
+    crossings = np.where(np.diff(np.signbit(totals)))[0]
+    if len(crossings) == 0:
+        return np.nan
+
+    candidates = []
+    for i in crossings:
+        s1, s2 = grid[i], grid[i + 1]
+        g1, g2 = totals[i], totals[i + 1]
+        candidates.append(float(s1 - g1 * (s2 - s1) / (g2 - g1)) if g2 != g1 else float(s1))
+
+    return min(candidates, key=lambda x: abs(x - curr_price))
+
+
+# ==========================================
+# 5. SPREAD STRIKE SELECTOR
+# ==========================================
+def get_grid_step(price: float) -> float:
+    if price < 25:
+        return 1.0
+    elif price < 50:
+        return 2.5
+    elif price < 300:
+        return 5.0
+    else:
+        return 10.0
+
+
+def build_spread_strikes(
+    curr_price: float,
+    wall: float,
+    spread_type: str = "BULL_PUT",
+    min_width_steps: int = 2
+) -> Tuple[float, float]:
+    """
+    BULL_PUT  -> (sell_short_put,  buy_long_put)
+    BEAR_CALL -> (sell_short_call, buy_long_call)
+    BEAR_PUT  -> (buy_long_put,    sell_short_put)
+    """
+    step = get_grid_step(curr_price)
+
+    if spread_type == "BULL_PUT":
+        min_ref = curr_price if np.isnan(wall) else min(wall, curr_price)
+        sell_strike = np.floor(min_ref / step) * step
+        buy_strike = sell_strike - (min_width_steps * step)
+        return float(sell_strike), float(buy_strike)
+
+    elif spread_type == "BEAR_CALL":
+        max_ref = curr_price if np.isnan(wall) else max(wall, curr_price)
+        sell_strike = np.ceil(max_ref / step) * step
+        buy_strike = sell_strike + (min_width_steps * step)
+        return float(sell_strike), float(buy_strike)
+
+    elif spread_type == "BEAR_PUT":
+        # Long leg anchored at spot so the debit retains convexity
+        buy_strike = np.floor(curr_price / step) * step
+        sell_strike = buy_strike - (min_width_steps * step)
+        return float(buy_strike), float(sell_strike)
+
+    return float(curr_price), float(curr_price)
+
+
+def clamp_below(level: float, spot: float, near: float = 0.02, far: float = 0.08) -> float:
+    """
+    Pin a level strictly below spot, between `near` and `far` fractional distance.
+
+    One-sided clamps were the source of 17%-wide stops: min(wall, spot*0.98)
+    guarantees the level sits below spot but puts no floor under how far below.
+    Falls back to the `near` bound when the reference level is missing.
+    """
+    lo = spot * (1.0 - far)
+    hi = spot * (1.0 - near)
+    if level is None or np.isnan(level):
+        return float(hi)
+    return float(min(max(level, lo), hi))
+
+
+def clamp_above(level: float, spot: float, near: float = 0.02, far: float = 0.08) -> float:
+    """Pin a level strictly above spot, between `near` and `far` fractional distance."""
+    lo = spot * (1.0 + near)
+    hi = spot * (1.0 + far)
+    if level is None or np.isnan(level):
+        return float(lo)
+    return float(min(max(level, lo), hi))
+
+
+# ==========================================
+# 6. SIGNAL & RANKING ENGINE
+# ==========================================
+def _empty_row(symbol: str, signal: str, strategy: str, score: float,
+               has_earnings_data: bool, **overrides) -> Dict:
+    row = {
+        "symbol": symbol,
+        "signal": signal,
+        "base_score": score,
+        "rank_score": score,
+        "has_earnings_data": has_earnings_data,
+        "price": np.nan,
+        "rsi": np.nan,
+        "gex_1pct_m": np.nan,
+        "gex_bps": np.nan,
+        "call_wall": np.nan,
+        "put_wall": np.nan,
+        "gamma_flip": np.nan,
+        "stop_loss": np.nan,
+        "target_price": np.nan,
+        "recommended_strategy": strategy,
+    }
+    row.update(overrides)
+    return row
+
+
+def calculate_equity_signal(symbol: str) -> Dict:
+    # Earnings check first: cheapest guard, avoids chain fetches on blackout names
+    earnings_status = cache.check_earnings_status(symbol, days_threshold=7)
+
+    if earnings_status is True:
+        curr_price = cache.get_spot_price(symbol)
+        return _empty_row(
+            symbol, "EARNINGS_BLACKOUT_VOL_CRUSH",
+            "AVOID / Long Straddle (IV Collapse Risk)", -100.0, True,
+            price=round(curr_price, 2) if not np.isnan(curr_price) else np.nan,
+        )
+
+    hist = cache.get_history(symbol, period="3y", auto_adjust=False)
+    if hist.empty or len(hist) < 200:
+        return _empty_row(
+            symbol, "NO_DATA", "Insufficient History (<200 bars)", -999.0,
+            earnings_status != "UNKNOWN",
+        )
+
+    gex_1pct_m, gex_bps, regime, call_wall, put_wall, gamma_flip, curr_price = \
+        calculate_gex_and_walls(symbol)
+
+    if regime == "NO_DATA" or np.isnan(curr_price):
+        return _empty_row(
+            symbol, "NO_DATA", "Data Unavailable / Chain Failed", -999.0,
+            earnings_status != "UNKNOWN",
+        )
+
+    hist = compute_indicators(hist)
+    latest = hist.iloc[-1]
+
+    rsi = latest.get('RSI', np.nan)
+    ema200 = latest.get('EMA_200', np.nan)
+
+    if np.isnan(rsi) or np.isnan(ema200):
+        return _empty_row(
+            symbol, "NO_DATA", "Missing Technical Indicators", -999.0,
+            earnings_status != "UNKNOWN",
+            price=round(float(curr_price), 2),
+            gex_1pct_m=gex_1pct_m, gex_bps=gex_bps,
+            call_wall=call_wall, put_wall=put_wall, gamma_flip=gamma_flip,
+        )
+
+    if earnings_status == "UNKNOWN":
+        return _empty_row(
+            symbol, "EARNINGS_DATA_UNAVAILABLE",
+            "MANUAL CHECK REQUIRED (Earnings Data Unreachable)", 10.0, False,
+            price=round(float(curr_price), 2),
+            rsi=round(float(rsi), 1),
+            gex_1pct_m=round(float(gex_1pct_m), 2),
+            gex_bps=round(float(gex_bps), 4) if not np.isnan(gex_bps) else np.nan,
+            call_wall=round(float(call_wall), 2) if not np.isnan(call_wall) else np.nan,
+            put_wall=round(float(put_wall), 2) if not np.isnan(put_wall) else np.nan,
+            gamma_flip=round(float(gamma_flip), 2) if not np.isnan(gamma_flip) else np.nan,
+        )
+
+    at_call_wall_band = (
+        not np.isnan(call_wall) and
+        (curr_price >= call_wall * 0.985) and
+        (curr_price <= call_wall * 1.020)
+    )
+
+    if rsi < 35 and curr_price >= ema200:
+        signal = "OVERSOLD_BULL_PULLBACK"
+        base_score = 80.0 + min(35.0 - rsi, 10.0)
+        sell_st, buy_st = build_spread_strikes(curr_price, put_wall, "BULL_PUT", 2)
+        strat = f"Bull Put Spread ${sell_st:.1f}/${buy_st:.1f}"
+        stop_loss = clamp_below(put_wall * 0.98 if not np.isnan(put_wall) else np.nan,
+                                curr_price, near=0.02, far=0.08)
+        target_price = clamp_above(np.nan, curr_price, near=0.04, far=0.04)
+
+    elif at_call_wall_band and rsi > 68:
+        signal = "RESISTANCE_PINNED_SHORT_VOL"
+        base_score = 60.0 + min(rsi - 68.0, 10.0)
+        sell_st, buy_st = build_spread_strikes(curr_price, call_wall, "BEAR_CALL", 2)
+        strat = f"Bear Call Spread ${sell_st:.1f}/${buy_st:.1f}"
+        stop_loss = clamp_above(call_wall * 1.02 if not np.isnan(call_wall) else np.nan,
+                                curr_price, near=0.03, far=0.06)
+        target_price = clamp_below(gamma_flip, curr_price, near=0.01, far=0.03)
+
+    elif at_call_wall_band:
+        signal = "WALL_PIN"
+        base_score = 40.0
+        strat = "Iron Condor / Short Volatility"
+        # Upside breach only; a condor's downside leg needs its own level if traded
+        stop_loss = clamp_above(call_wall * 1.02 if not np.isnan(call_wall) else np.nan,
+                                curr_price, near=0.03, far=0.06)
+        target_price = curr_price * 1.005
+
+    elif regime == "POSITIVE_GEX":
+        signal = "DAMPENED_BULL_TREND"
+        base_score = 30.0
+        strat = "Covered Calls / Cash-Secured Puts"
+        stop_loss = clamp_below(gamma_flip, curr_price, near=0.03, far=0.08)
+        target_price = clamp_above(call_wall, curr_price, near=0.02, far=0.10)
+
+    else:  # NEGATIVE_GEX
+        if rsi < 40 and curr_price < ema200:
+            signal = "VOLATILITY_EXPANSION_BEAR"
+            base_score = 75.0 + min(40.0 - rsi, 10.0)
+            buy_st, sell_st = build_spread_strikes(curr_price, put_wall, "BEAR_PUT", 2)
+            strat = f"Bear Put Debit Spread ${buy_st:.1f}/${sell_st:.1f}"
+            ref_stop = gamma_flip if not np.isnan(gamma_flip) else ema200
+            stop_loss = clamp_above(ref_stop, curr_price, near=0.03, far=0.08)
+            target_price = clamp_below(put_wall * 0.95 if not np.isnan(put_wall) else np.nan,
+                                       curr_price, near=0.05, far=0.15)
+        else:
+            signal = "HIGH_VOLATILITY_DANGER_ZONE"
+            base_score = 15.0
+            strat = "Long Gamma / Long Strangles"
+            # Non-directional trade; these levels describe the move size, not a side
+            stop_loss = curr_price * 0.95
+            target_price = curr_price * 1.10
+
+    return {
+        "symbol": symbol,
+        "signal": signal,
+        "base_score": round(float(base_score), 2),
+        "rank_score": round(float(base_score), 2),
+        "has_earnings_data": True,
+        "price": round(float(curr_price), 2),
+        "rsi": round(float(rsi), 1),
+        "gex_1pct_m": round(float(gex_1pct_m), 2),
+        "gex_bps": round(float(gex_bps), 4) if not np.isnan(gex_bps) else np.nan,
+        "call_wall": round(float(call_wall), 2) if not np.isnan(call_wall) else np.nan,
+        "put_wall": round(float(put_wall), 2) if not np.isnan(put_wall) else np.nan,
+        "gamma_flip": round(float(gamma_flip), 2) if not np.isnan(gamma_flip) else np.nan,
+        "stop_loss": round(float(stop_loss), 2) if not np.isnan(stop_loss) else np.nan,
+        "target_price": round(float(target_price), 2) if not np.isnan(target_price) else np.nan,
+        "recommended_strategy": strat,
+    }
+
+
+# ==========================================
+# 7. PIPELINE RUNNER & CROSS-SECTIONAL RANKING
+# ==========================================
+# Signals representing an actual identified setup. Only these get ranked.
+SETUP_SIGNALS = [
+    "OVERSOLD_BULL_PULLBACK",
+    "RESISTANCE_PINNED_SHORT_VOL",
+    "WALL_PIN",
+    "VOLATILITY_EXPANSION_BEAR",
+]
+
+# DAMPENED_BULL_TREND is the residual bucket: positive gamma, no wall proximity,
+# no RSI extreme. It is "nothing identified here", not a setup. Ranking inside it
+# sorts on gex_bps alone, which is net gamma over market cap -- a structural
+# property of the ticker, not a timing signal. The same names would top that list
+# every day. So it is reported unranked.
+RESIDUAL_SIGNALS = ["DAMPENED_BULL_TREND"]
+
+AVOID_SIGNALS = [
+    "EARNINGS_BLACKOUT_VOL_CRUSH",
+    "EARNINGS_DATA_UNAVAILABLE",
+    "HIGH_VOLATILITY_DANGER_ZONE",
+]
+
+
+def generate_top_trades(symbols_list: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Returns (ranked setups, unranked residual, avoid list)."""
+    setups = []
+    residual = []
+    avoid_list = []
+
+    # Order-preserving dedupe. A repeated ticker costs a duplicate row and, worse,
+    # double-counts in the cross-sectional percentile, shifting every other name.
+    seen = set()
+    symbols = []
+    for s in symbols_list:
+        u = s.strip().upper()
+        if u and u not in seen:
+            seen.add(u)
+            symbols.append(u)
+
+    dropped = len(symbols_list) - len(symbols)
+    if dropped:
+        print(f"[INFO] Dropped {dropped} duplicate ticker(s) from the watchlist.")
+
+    print(f"Scanning {len(symbols)} tickers with Normalized BS-GEX Engine...")
+
+    for idx, sym in enumerate(symbols, 1):
+        print(f"[{idx}/{len(symbols)}] Scanning {sym}...", end="\r")
+        try:
+            res = calculate_equity_signal(sym)
+            if res["signal"] in AVOID_SIGNALS:
+                avoid_list.append(res)
+            elif res["signal"] in RESIDUAL_SIGNALS:
+                residual.append(res)
+            elif res["signal"] in SETUP_SIGNALS:
+                setups.append(res)
+            # NO_DATA and anything unrecognised is dropped
+        except Exception as e:
+            print(f"\n[ERROR] Exception processing {sym}: {e}")
+
+    print("\nScan Complete!\n")
+
+    df_setups = pd.DataFrame(setups)
+    if not df_setups.empty:
+        # Orient GEX by setup direction: bearish setups want negative gamma
+        oriented_gex = np.where(
+            df_setups['signal'] == "VOLATILITY_EXPANSION_BEAR",
+            -df_setups['gex_bps'],
+            df_setups['gex_bps']
+        )
+
+        # NaN gex_bps (failed market-cap lookup) falls through to a neutral 0.5.
+        # Check the finite count first: np.std on an empty slice warns.
+        finite = np.isfinite(oriented_gex)
+        n_rows = len(df_setups)
+        n_finite = int(finite.sum())
+
+        if n_finite > 1 and np.std(oriented_gex[finite]) > 1e-6:
+            df_setups['gex_pct'] = pd.Series(oriented_gex).rank(pct=True).fillna(0.5).values
+        else:
+            # With one setup row the bonus is a constant offset and changes no ordering.
+            df_setups['gex_pct'] = 0.5
+
+        # Only a genuine data problem warrants the warning. A single-row scan is
+        # not a data problem, and previously tripped this by itself.
+        if n_rows > 1 and n_finite <= n_rows / 2:
+            print(f"[WARN] Market cap unavailable for {n_rows - n_finite}/{n_rows} ranked "
+                  f"tickers; GEX ranking term is weak or inactive this scan.")
+
+        df_setups['rank_score'] = (df_setups['base_score'] + df_setups['gex_pct'] * 9.0).round(2)
+        df_setups = df_setups.sort_values(by="rank_score", ascending=False).reset_index(drop=True)
+
+    df_residual = pd.DataFrame(residual)
+    if not df_residual.empty:
+        # Sorted by ticker, not by score -- there is no meaningful ordering here
+        df_residual = df_residual.sort_values(by="symbol").reset_index(drop=True)
+
+    df_avoid = pd.DataFrame(avoid_list)
+    if not df_avoid.empty:
+        df_avoid = df_avoid.sort_values(by="symbol").reset_index(drop=True)
+
+    return df_setups, df_residual, df_avoid
+
+
+# ==========================================
+# 8. COLAB EXECUTION BLOCK
+# ==========================================
+if __name__ == "__main__":
+    # Duplicates are removed automatically, so a messy list is fine.
+    #
+    # CAUTION on leveraged ETFs (MSTU, SOXL, TQQQ, etc.): they have no meaningful
+    # market cap, so gex_bps comes back NaN and the GEX term goes neutral for them.
+    # Their RSI and 200 EMA are also distorted by daily-reset volatility decay, so
+    # the technical thresholds here do not mean what they mean on an equity.
+    watchlist = [
+        "AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA",
+        "AMD", "AMAT", "ASML", "DDOG", "HOOD", "MSTR", "ORCL", "MU",
+        "INTC", "COIN", "PLTR", "IREN", "BE"
+    ]
+
+    df_setups, df_residual, df_avoid = generate_top_trades(watchlist)
+
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.width', 1000)
+
+    if not df_setups.empty:
+        print("=== IDENTIFIED SETUPS (ranked) ===")
+        print(df_setups[[
+            "symbol", "signal", "rank_score", "base_score", "price",
+            "rsi", "gex_1pct_m", "gex_bps", "call_wall", "put_wall", "gamma_flip",
+            "stop_loss", "target_price", "recommended_strategy"
+        ]])
+    else:
+        print("=== IDENTIFIED SETUPS (ranked) ===")
+        print("None. No ticker hit a defined setup this scan.")
+
+    if not df_residual.empty:
+        print("\n=== NO SETUP IDENTIFIED (unranked, alphabetical) ===")
+        print("Positive gamma, no wall proximity, no RSI extreme. Listed for reference only;")
+        print("there is no ordering here because nothing distinguishes these names today.\n")
+        print(df_residual[[
+            "symbol", "price", "rsi", "gex_1pct_m", "call_wall", "put_wall", "gamma_flip"
+        ]])
+
+    if not df_avoid.empty:
+        print("\n=== BLACKOUT / AVOID / DATA-UNAVAILABLE ===")
+        print(df_avoid[[
+            "symbol", "signal", "has_earnings_data", "price", "recommended_strategy"
+        ]])
