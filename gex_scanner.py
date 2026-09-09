@@ -1,27 +1,43 @@
-!pip install yfinance numpy pandas scipy --quiet
-
 """
 Institutional Options Entry & GEX Execution Engine
 --------------------------------------------------
 Black-Scholes gamma exposure scanner with signal classification,
 cross-sectional ranking, and spread strike construction.
 
-Colab usage:
-    Paste this whole file into one cell and run. The leading !pip line is
-    Colab/IPython syntax, not Python -- running this file with `python
-    gex_scanner.py` will fail on it. Delete that line to run outside a notebook.
+Native usage:
+    pip install yfinance numpy pandas scipy
+    python3 gex_scanner.py
 
 NOTE: Signal thresholds, tier base scores, and the GEX bonus weight are
 hand-set, not fitted. Nothing here has been validated against forward
 returns. Treat the ranking as a triage view, not a tested edge.
 """
 
+import os
 import time
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 from scipy.stats import norm
 from typing import Dict, Tuple, List, Union
+
+
+def notify_ntfy(title: str, message: str) -> None:
+    """Push a summary to the user's phone via ntfy.sh. No-op if NTFY_TOPIC is unset."""
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        print("[notify] NTFY_TOPIC not set; skipping push notification.")
+        return
+    try:
+        requests.post(
+            f"https://ntfy.sh/{topic}",
+            data=message.encode("utf-8"),
+            headers={"Title": title, "Priority": "default"},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        print(f"[notify] Failed to send ntfy push: {exc}")
 
 
 # ==========================================
@@ -882,3 +898,16 @@ if __name__ == "__main__":
         print(df_avoid[[
             "symbol", "signal", "has_earnings_data", "price", "recommended_strategy"
         ]])
+
+    if not df_setups.empty:
+        top = df_setups.head(5)
+        summary = "\n".join(
+            f"{r.symbol} {r.signal} score={r.rank_score} {r.recommended_strategy}"
+            for r in top.itertuples()
+        )
+        title = f"GEX Scan: {len(df_setups)} setup(s) found"
+    else:
+        summary = "No ticker hit a defined setup this scan."
+        title = "GEX Scan: no setups"
+
+    notify_ntfy(title, summary)
