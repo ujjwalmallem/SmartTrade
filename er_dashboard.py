@@ -22,6 +22,11 @@ What changed vs. the original
 8. Reaction target and analyst target are separate columns. The original
    preferred the analyst target whenever it sat in the 0.95-1.55x band, so the
    "high upside" star was mostly an analyst-target screen in disguise.
+9. Yahoo calls retry with exponential backoff instead of giving up on the
+   first error, and price/OHLCV history falls back to Stooq (a separate,
+   keyless data source) when Yahoo has none for a symbol. A row using
+   fallback data is flagged "price-src:stooq", not silently indistinguishable
+   from a normal Yahoo-served row.
 
 This ranks price/volume behaviour around earnings. It is not investment advice
 and says nothing about whether a business is worth owning.
@@ -34,6 +39,7 @@ Native usage:
 import os
 import time
 import warnings
+from io import StringIO
 
 import numpy as np
 import pandas as pd
@@ -61,6 +67,27 @@ def notify_ntfy(title: str, message: str) -> None:
         )
     except requests.RequestException as exc:
         print(f"[notify] Failed to send ntfy push: {exc}")
+
+
+def with_retries(fn, *args, retries=3, base_delay=1.0, label="", **kwargs):
+    """Call fn(*args, **kwargs) with exponential backoff. Returns None if every attempt fails.
+
+    Most Yahoo fetch failures we've hit in practice are transient rate-limiting
+    (a "cookie/crumb" fetch error, a bare 403) rather than the symbol having no
+    data, so a short retry clears most of them without needing a second source.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            tag = label or getattr(fn, "__name__", "call")
+            if attempt == retries:
+                print(f"[retry] {tag} failed after {retries} attempts: {exc}")
+                return None
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f"[retry] {tag} attempt {attempt} failed ({exc}); retrying in {delay:.0f}s")
+            time.sleep(delay)
+    return None
 
 
 # ====================== SETTINGS ======================
@@ -144,13 +171,62 @@ def close_panel(raw, tickers):
     return px
 
 
+# ====================== STOOQ FALLBACK (keyless, independent of Yahoo) ======================
+STOOQ_HISTORY_DAYS = 130   # calendar days; comfortably covers HISTORY_PERIOD="3mo" of sessions
+
+
+def fetch_stooq_history(ticker, days=STOOQ_HISTORY_DAYS):
+    """Daily OHLCV from Stooq. No API key; separate infra from Yahoo, so it
+    isn't affected by Yahoo rate-limiting/blocking. Returns None on any
+    failure so callers can flag the row rather than fabricate a value."""
+    sym = f"{ticker.lower()}.us"
+    try:
+        resp = requests.get(f"https://stooq.com/q/d/l/?s={sym}&i=d", timeout=10)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        print(f"[stooq] {ticker}: request failed ({exc})")
+        return None
+
+    text = resp.text.strip()
+    if not text or "Date" not in text.splitlines()[0]:
+        return None   # Stooq returns a plain "No data" body for unknown symbols
+
+    try:
+        df = pd.read_csv(StringIO(text), parse_dates=["Date"])
+    except Exception as exc:
+        print(f"[stooq] {ticker}: parse failed ({exc})")
+        return None
+
+    keep = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in df.columns]
+    if df.empty or len(keep) < 5:
+        return None
+
+    df = df.set_index("Date").sort_index()[keep].astype(float)
+    df.index = _naive_index(df.index)
+    return df.tail(days) if len(df) > days else df
+
+
+def fill_missing_close_columns(px, symbols, min_sessions=21):
+    """Backfill sparse/missing Close columns (sector ETFs, benchmark) from
+    Stooq. These are shared across every ticker's relative-strength calc, so
+    a single missing ETF silently blanks that stat for every stock in the
+    sector -- worth patching even though most rows never hit this path."""
+    for sym in symbols:
+        have = px[sym].notna().sum() if sym in px.columns else 0
+        if have >= min_sessions:
+            continue
+        hist = fetch_stooq_history(sym)
+        if hist is None or "Close" not in hist.columns:
+            continue
+        px = px.combine_first(pd.DataFrame({sym: hist["Close"]}))
+        print(f"[stooq] backfilled {sym} close history ({len(hist)} sessions)")
+    return px
+
+
 # ====================== EARNINGS DATES ======================
 def get_earnings_dates(ticker):
     """(last_reported, next_scheduled) as tz-naive Timestamps, or (None, None)."""
-    try:
-        ed = yf.Ticker(ticker).earnings_dates
-    except Exception:
-        return None, None
+    ed = with_retries(lambda: yf.Ticker(ticker).earnings_dates, label=f"{ticker} earnings_dates")
     if ed is None or ed.empty:
         return None, None
 
@@ -170,10 +246,7 @@ def get_earnings_dates(ticker):
 
 def get_eps_surprise(ticker):
     """Surprise % from the most recent row that has both estimate and actual."""
-    try:
-        ed = yf.Ticker(ticker).earnings_dates
-    except Exception:
-        return np.nan
+    ed = with_retries(lambda: yf.Ticker(ticker).earnings_dates, label=f"{ticker} earnings_dates")
     if ed is None or ed.empty:
         return np.nan
 
@@ -200,9 +273,8 @@ def get_basic_info(ticker):
         "target_mean": np.nan,
         "ok": False,
     }
-    try:
-        info = yf.Ticker(ticker).info or {}
-    except Exception:
+    info = with_retries(lambda: yf.Ticker(ticker).info, label=f"{ticker} info")
+    if not info:
         return out
 
     def num(key):
@@ -401,14 +473,21 @@ def build_dashboard(tickers=CORE_TICKERS, after_hours_focus=AFTER_HOURS_FOCUS,
     etfs = sorted(set(SECTOR_ETF.values()) | {DEFAULT_ETF})
     universe = sorted(set(tickers) | set(etfs) | {BENCHMARK})
 
+    def _download_batch():
+        result = yf.download(universe, period=HISTORY_PERIOD, progress=False,
+                             auto_adjust=True, group_by="column", threads=True)
+        if result is None or result.empty:
+            raise RuntimeError("empty result")
+        return result
+
     print(f"Batch download: {len(universe)} symbols, period={HISTORY_PERIOD} ...")
-    raw = yf.download(universe, period=HISTORY_PERIOD, progress=False,
-                      auto_adjust=True, group_by="column", threads=True)
-    if raw is None or raw.empty:
-        print("Download returned nothing. Aborting.")
-        return pd.DataFrame()
+    raw = with_retries(_download_batch, retries=3, base_delay=2.0, label="batched yf.download")
+    if raw is None:
+        print("Yahoo batch download failed after retries; falling back to per-symbol Stooq below.")
+        raw = pd.DataFrame()
 
     px = close_panel(raw, universe)
+    px = fill_missing_close_columns(px, set(etfs) | {BENCHMARK})
     print(f"Got {len(px)} sessions, {px.shape[1]} symbols.\n")
 
     rows = []
@@ -418,8 +497,11 @@ def build_dashboard(tickers=CORE_TICKERS, after_hours_focus=AFTER_HOURS_FOCUS,
 
         df = ticker_frame(raw, ticker)
         if df is None:
-            print("NO PRICE DATA")
-            continue
+            df = fetch_stooq_history(ticker)
+            if df is None:
+                print("NO PRICE DATA (Yahoo + Stooq both failed)")
+                continue
+            flags.append("price-src:stooq")
 
         info = get_basic_info(ticker)
         if not info["ok"]:
