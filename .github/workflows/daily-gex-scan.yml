@@ -2,7 +2,7 @@ name: Daily GEX Scan
 
 on:
   schedule:
-    - cron: "25 13 * * 1-5"   # 9:25 AM ET = 13:25 UTC
+    - cron: "35 13 * * 1-5"   # 9:35 AM ET = 13:35 UTC (5 min after market open, so it has a live opening quote)
   workflow_dispatch:
 
 jobs:
