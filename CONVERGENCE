@@ -1,0 +1,521 @@
+# ============================================================
+# Full self-contained notebook cell
+# Mag7 + Semis + Energy + Crypto using Yahoo Finance
+# ============================================================
+"""
+Convergence Signal & Backtest Engine
+-------------------------------------
+Cross-sectional equity/crypto scanner that builds a rolling state vector
+per symbol (return lags, realized vol, log volume, ATR), then scores each
+name on three axes: curvature (eigenvalue decay of the rolling covariance,
+i.e. how "compressed" the recent state has been), momentum (projection of
+today's state onto the top momentum subspace from an SVD), and anomaly
+(robust Mahalanobis distance of today's state from its recent history).
+The three are blended into a single "conv" (convergence) score, ranked
+cross-sectionally, and used to drive a simple fixed-risk long-only
+backtest with ATR-based stops/targets.
+
+Colab usage:
+    Paste this whole file into one cell and run. The leading !pip line is
+    Colab/IPython syntax, not Python -- running this file with `python
+    convergence.py` will fail on it. Delete that line to run outside a
+    notebook.
+
+NOTE: Feature windows, score weights, and the long/momentum thresholds
+are hand-set, not fitted. Nothing here has been walk-forward validated
+or checked for overfitting to the 2023-07 -> present sample. Treat the
+backtest metrics as a sanity check on plumbing, not a tested edge.
+"""
+
+!pip install yfinance numpy pandas scipy -q
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from scipy.stats import chi2
+from datetime import datetime
+import warnings
+warnings.filterwarnings("ignore")
+
+# ------------------------------------------------------------
+# Universe
+# ------------------------------------------------------------
+TICKERS = [
+    # Mag 7
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA",
+    # Semis
+    "AMD", "AVGO", "TSM", "ASML", "QCOM", "MU", "AMAT", "LRCX", "KLAC",
+    # Energy
+    "XOM", "CVX", "COP", "SLB", "EOG", "XLE",
+    # Crypto
+    "BTC-USD", "ETH-USD"
+]
+
+# ------------------------------------------------------------
+# 1. Load data from Yahoo Finance
+# ------------------------------------------------------------
+def load_universe_yahoo(tickers, start="2023-07-01", end=None):
+    if end is None:
+        end = datetime.now().strftime("%Y-%m-%d")
+
+    print("Downloading data from Yahoo Finance...")
+    data = yf.download(
+        tickers,
+        start=start,
+        end=end,
+        group_by="ticker",
+        auto_adjust=True,
+        threads=True,
+        progress=False
+    )
+
+    prices, volumes = {}, {}
+
+    for t in tickers:
+        try:
+            df = data if len(tickers) == 1 else data[t]
+            if df is None or df.empty or "Close" not in df.columns:
+                print(f"  ✗ {t}")
+                continue
+            prices[t] = df["Close"].dropna()
+            volumes[t] = df["Volume"].dropna()
+            print(f"  ✓ {t:10s}  {len(prices[t])} bars")
+        except Exception as e:
+            print(f"  ✗ {t} – {e}")
+
+    return prices, volumes
+
+# ------------------------------------------------------------
+# 2. Feature & scoring helpers
+# ------------------------------------------------------------
+def rolling_robust_z(arr, window=60):
+    T, d = arr.shape
+    out = np.zeros_like(arr)
+    for t in range(T):
+        start = max(0, t - window + 1)
+        sub = arr[start:t+1]
+        med = np.nanmedian(sub, axis=0)
+        mad = np.nanmedian(np.abs(sub - med), axis=0) + 1e-9
+        out[t] = (arr[t] - med) / mad
+    return out
+
+def build_state_vector(price, volume, ret_lags=(1,5,20), vol_windows=(10,20)):
+    logp = np.log(price)
+    ret = logp.diff().fillna(0.0)
+    df = pd.DataFrame(index=price.index)
+    for k in ret_lags:
+        df[f"r{k}"] = ret.rolling(k).sum().fillna(0.0)
+    for w in vol_windows:
+        df[f"rv{w}"] = ret.rolling(w).std().fillna(0.0)
+    df["logvol"] = np.log(volume + 1).ffill()
+    df["price"] = price
+    df["atr"] = price.diff().abs().rolling(14).mean().bfill().fillna(price * 0.008)
+    return df
+
+def curvature_score(X, r=2):
+    if X.shape[0] <= r + 1:
+        return 0.0
+    Xc = X - X.mean(0)
+    C = np.cov(Xc, rowvar=False) + 1e-8 * np.eye(X.shape[1])
+    eig = np.linalg.eigvalsh(C)[::-1]
+    if len(eig) <= r:
+        return 0.0
+    return float(eig[r:].sum() / (eig[:r].sum() + 1e-12))
+
+def build_momentum_subspace(X, k=3):
+    if X.shape[0] < 2 or X.shape[1] < 2:
+        return np.eye(X.shape[1])[:, :min(k, X.shape[1])]
+    Xc = X - X.mean(0)
+    _, _, Vt = np.linalg.svd(Xc, full_matrices=False)
+    return Vt[:min(k, Vt.shape[0])].T
+
+def projection_score(U, xt, xprev):
+    P = U @ U.T
+    pt = P @ xt
+    pp = P @ xprev
+    m = np.linalg.norm(pt) + 1e-12
+    s = np.dot(pt, pp) / ((np.linalg.norm(pp) + 1e-12) * m)
+    return float(m * max(0.0, s))
+
+def mahalanobis_score(X, xt, shrink=0.15):
+    if X.shape[0] < 12:
+        return 0.0, 0.0
+    mu = X.mean(0)
+    emp = np.cov(X, rowvar=False)
+    target = np.diag(np.diag(emp))
+    cov = (1 - shrink) * emp + shrink * target + 1e-8 * np.eye(X.shape[1])
+    try:
+        inv = np.linalg.pinv(cov)
+        D2 = float((xt - mu) @ inv @ (xt - mu))
+        p = 1 - chi2.cdf(max(D2, 0), df=X.shape[1])
+        return float(-np.log(p + 1e-12)), D2
+    except:
+        return 0.0, 0.0
+
+def entry_stop_target(price, atr, stop_k=2.0, RR=2.5):
+    stop = price - stop_k * atr
+    if stop >= price * 0.998:
+        stop = price * 0.99
+    risk = price - stop
+    target = price + RR * risk
+    return float(stop), float(target), float(RR)
+
+# ------------------------------------------------------------
+# 3. Signal Pipeline
+# ------------------------------------------------------------
+def run_pipeline(prices, volumes, params):
+    symbols = sorted(prices.keys())
+    states = {
+        s: build_state_vector(prices[s], volumes[s],
+                              params["ret_lags"], params["vol_windows"])
+        for s in symbols
+    }
+
+    common = states[symbols[0]].index
+    for s in symbols[1:]:
+        common = common.intersection(states[s].index)
+    for s in symbols:
+        states[s] = states[s].loc[common]
+
+    T = len(common)
+    feats = [c for c in states[symbols[0]].columns if c not in ("price", "atr")]
+    n_sym, n_f = len(symbols), len(feats)
+
+    X = np.zeros((T, n_sym, n_f))
+    P = np.zeros((T, n_sym))
+    A = np.zeros((T, n_sym))
+    ADV = np.zeros((T, n_sym))
+
+    for i, s in enumerate(symbols):
+        X[:, i, :] = states[s][feats].values
+        P[:, i] = states[s]["price"].values
+        A[:, i] = states[s]["atr"].values
+        ADV[:, i] = np.exp(states[s]["logvol"].values)
+
+    Xn = np.zeros_like(X)
+    for i in range(n_sym):
+        Xn[:, i, :] = rolling_robust_z(X[:, i, :], params["window"])
+
+    records = []
+    W = params["window"]
+    for t in range(W, T):
+        for i, s in enumerate(symbols):
+            Xw = Xn[t-W+1:t+1, i, :]
+            xt = Xn[t, i, :]
+            xp = Xn[t-1, i, :]
+            kappa = curvature_score(Xw, params["r"])
+            U = build_momentum_subspace(Xw, params["k"])
+            mom = projection_score(U, xt, xp)
+            anom, _ = mahalanobis_score(Xw, xt)
+            px = P[t, i]
+            atr = max(A[t, i], px * 0.006)
+            stop, tgt, rr = entry_stop_target(px, atr, params["stop_k"], params["RR"])
+            records.append({
+                "date": common[t],
+                "symbol": s,
+                "kappa": kappa,
+                "momentum": mom,
+                "anomaly": anom,
+                "price": px,
+                "atr": atr,
+                "stop": stop,
+                "target": tgt,
+                "rr": rr,
+                "adv": ADV[t, i]
+            })
+
+    df = pd.DataFrame(records)
+
+    def norm(g, col):
+        v = g[col].values
+        lo, hi = np.nanpercentile(v, [3, 97])
+        if hi - lo < 1e-9:
+            return np.zeros(len(v))
+        return np.clip((v - lo) / (hi - lo), 0, 1)
+
+    for col in ["kappa", "momentum", "anomaly"]:
+        df[f"{col}_n"] = df.groupby("date", group_keys=False).apply(
+            lambda g: pd.Series(norm(g, col), index=g.index)
+        )
+
+    w = params["weights"]
+    df["conv"] = (w[0] * df["kappa_n"] +
+                  w[1] * df["momentum_n"] +
+                  w[2] * df["anomaly_n"])
+    df["score"] = df.groupby("date")["conv"].transform(
+        lambda x: 100 * (x - x.min()) / (x.max() - x.min() + 1e-12)
+    )
+
+    def decide(r):
+        if r["adv"] < params["min_adv"] or r["rr"] < params["min_rr"]:
+            return "skip"
+        if r["momentum_n"] >= params["mom_thresh"] and r["score"] >= params["long_thresh"]:
+            return "long"
+        return "neutral"
+
+    df["signal"] = df.apply(decide, axis=1)
+    return df
+
+# ------------------------------------------------------------
+# 4. Backtester
+# ------------------------------------------------------------
+def run_backtest(df_sig, prices, params, capital=100_000., risk_frac=0.0075):
+    dates = sorted(df_sig["date"].unique())
+    equity = capital
+    curve = []
+    trades = []
+    open_pos = {}
+
+    for i, dt in enumerate(dates[:-1]):
+        ndt = dates[i + 1]
+
+        # Manage open positions
+        to_close = []
+        for sym, pos in open_pos.items():
+            if ndt not in prices[sym].index:
+                continue
+            px = float(prices[sym].loc[ndt])
+            reason = None
+            if px <= pos["stop"]:
+                reason = "stop"
+            elif px >= pos["target"]:
+                reason = "target"
+            elif (ndt - pos["edate"]).days >= params["max_hold"]:
+                reason = "time"
+
+            if reason:
+                ret = (px - pos["entry"]) / pos["entry"]
+                pnl = ret * pos["notional"]
+                trades.append({
+                    "symbol": sym,
+                    "entry_date": pos["edate"],
+                    "exit_date": ndt,
+                    "entry": pos["entry"],
+                    "exit": px,
+                    "ret": ret,
+                    "pnl": pnl,
+                    "reason": reason
+                })
+                equity += pnl
+                to_close.append(sym)
+
+        for s in to_close:
+            del open_pos[s]
+
+        # New entries
+        cands = (df_sig[(df_sig["date"] == dt) & (df_sig["signal"] == "long")]
+                 .sort_values("score", ascending=False))
+        slots = params["max_pos"] - len(open_pos)
+
+        for _, row in cands.head(max(0, slots)).iterrows():
+            sym = row["symbol"]
+            if sym in open_pos or ndt not in prices[sym].index:
+                continue
+            entry = float(prices[sym].loc[ndt])
+            stop = row["stop"]
+            risk_dist = entry - stop
+            if risk_dist <= entry * 0.002:
+                continue
+            risk_amount = equity * risk_frac
+            shares = risk_amount / risk_dist
+            notional = shares * entry
+            open_pos[sym] = {
+                "entry": entry,
+                "stop": stop,
+                "target": row["target"],
+                "notional": notional,
+                "edate": ndt
+            }
+
+        curve.append({"date": ndt, "equity": equity, "n_open": len(open_pos)})
+
+    # Force close remaining
+    last = dates[-1]
+    for sym, pos in list(open_pos.items()):
+        if last in prices[sym].index:
+            px = float(prices[sym].loc[last])
+            ret = (px - pos["entry"]) / pos["entry"]
+            pnl = ret * pos["notional"]
+            trades.append({
+                "symbol": sym,
+                "entry_date": pos["edate"],
+                "exit_date": last,
+                "entry": pos["entry"],
+                "exit": px,
+                "ret": ret,
+                "pnl": pnl,
+                "reason": "eod"
+            })
+            equity += pnl
+
+    return pd.DataFrame(trades), pd.DataFrame(curve), equity
+
+# ------------------------------------------------------------
+# 5. Metrics
+# ------------------------------------------------------------
+def compute_metrics(trades, curve, init_cap):
+    if len(trades) == 0:
+        return {"n_trades": 0}
+
+    r = trades["ret"].values
+    wins = r[r > 0]
+    losses = r[r <= 0]
+    n = len(r)
+    wr = len(wins) / n
+    aw = wins.mean() if len(wins) else 0.0
+    al = abs(losses.mean()) if len(losses) else 1e-9
+    exp = wr * aw - (1 - wr) * al
+
+    gp = trades.loc[trades["pnl"] > 0, "pnl"].sum()
+    gl = abs(trades.loc[trades["pnl"] <= 0, "pnl"].sum())
+    pf = gp / gl if gl > 0 else np.inf
+
+    eq = curve["equity"].values
+    peak = np.maximum.accumulate(eq)
+    mdd = ((peak - eq) / peak).max()
+    tot_ret = eq[-1] / init_cap - 1
+    days = (curve["date"].iloc[-1] - curve["date"].iloc[0]).days
+    ann = (1 + tot_ret) ** (365.25 / max(days, 1)) - 1
+
+    return {
+        "n_trades": n,
+        "win_rate": round(wr, 4),
+        "avg_win": round(aw, 4),
+        "avg_loss": round(al, 4),
+        "expectancy": round(exp, 4),
+        "profit_factor": round(pf, 3),
+        "max_drawdown": round(mdd, 4),
+        "total_return": round(tot_ret, 4),
+        "ann_return_approx": round(ann, 4),
+        "final_equity": round(eq[-1], 0),
+        "realized_RR": round(aw / al, 2)
+    }
+
+# ------------------------------------------------------------
+# 6. Execute everything
+# ------------------------------------------------------------
+params = {
+    "ret_lags": (1, 5, 20),
+    "vol_windows": (10, 20),
+    "window": 60,
+    "r": 2,
+    "k": 3,
+    "stop_k": 1.4,
+    "RR": 2.8,
+    "weights": (0.15, 0.65, 0.20),
+    "min_adv": 1_500_000,
+    "min_rr": 1.8,
+    "mom_thresh": 0.65,
+    "long_thresh": 75.0,
+    "max_pos": 4,
+    "max_hold": 7,
+    "risk_frac": 0.004,
+}
+
+print("Loading real universe (Mag7 + Semis + Energy + Crypto) via Yahoo Finance...")
+prices, volumes = load_universe_yahoo(TICKERS, start="2023-07-01")
+print(f"\nSuccessfully loaded {len(prices)} tickers\n")
+
+if len(prices) >= 8:
+    print("Building signals...")
+    df_sig = run_pipeline(prices, volumes, params)
+    print(df_sig["signal"].value_counts())
+
+    print("\nRunning backtest...")
+    trades, curve, final = run_backtest(
+        df_sig, prices, params,
+        capital=100_000.0,
+        risk_frac=0.0075
+    )
+
+    print("\n==================== RESULTS ====================")
+    metrics = compute_metrics(trades, curve, 100_000.0)
+    for k, v in metrics.items():
+        print(f"{k:20s}: {v}")
+
+    print("\nRecent closed trades:")
+    if len(trades) > 0:
+        print(trades.tail(8).to_string(index=False))
+    else:
+        print("No trades generated")
+else:
+    print("Not enough data loaded. Check ticker list or internet connection.")
+
+
+# ============================================================
+# SIGNAL ACCURACY DEEP DIVE
+# ============================================================
+
+print("="*60)
+print("SIGNAL ACCURACY ANALYSIS")
+print("="*60)
+
+# 1. Basic exit reason breakdown
+print("\n1. Exit Reason Breakdown")
+print(trades["reason"].value_counts(normalize=True).round(3) * 100)
+
+# 2. Performance by exit reason
+print("\n2. Avg Return by Exit Reason")
+print(trades.groupby("reason")["ret"].agg(["count", "mean", "median"]).round(4))
+
+# 3. Win rate & expectancy by symbol
+print("\n3. Performance by Symbol (Top & Bottom)")
+by_sym = trades.groupby("symbol").agg(
+    trades=("ret", "count"),
+    win_rate=("ret", lambda x: (x > 0).mean()),
+    avg_ret=("ret", "mean"),
+    total_pnl=("pnl", "sum")
+).sort_values("total_pnl", ascending=False)
+
+print("\nBest symbols:")
+print(by_sym.head(8).round(3))
+print("\nWorst symbols:")
+print(by_sym.tail(8).round(3))
+
+# 4. Sector / Group analysis
+def get_group(t):
+    if t in ["AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA"]:
+        return "Mag7"
+    elif t in ["AMD","AVGO","TSM","ASML","QCOM","MU","AMAT","LRCX","KLAC"]:
+        return "Semis"
+    elif t in ["XOM","CVX","COP","SLB","EOG","XLE"]:
+        return "Energy"
+    else:
+        return "Crypto"
+
+trades["group"] = trades["symbol"].apply(get_group)
+
+print("\n4. Performance by Group")
+print(trades.groupby("group").agg(
+    trades=("ret", "count"),
+    win_rate=("ret", lambda x: (x > 0).mean()),
+    avg_ret=("ret", "mean"),
+    total_pnl=("pnl", "sum"),
+    avg_win=("ret", lambda x: x[x>0].mean()),
+    avg_loss=("ret", lambda x: x[x<=0].mean())
+).round(3))
+
+# 5. Conviction score vs outcome (if score is still available)
+# We need to merge score back onto trades
+sig_scores = df_sig[["date", "symbol", "score"]].copy()
+sig_scores = sig_scores.rename(columns={"date": "signal_date"})
+
+# Approximate: use entry_date - 1 business day as signal date
+trades["signal_date"] = trades["entry_date"] - pd.tseries.offsets.BDay(1)
+merged = trades.merge(sig_scores, left_on=["signal_date", "symbol"], right_on=["signal_date", "symbol"], how="left")
+
+if "score" in merged.columns:
+    merged["score_quartile"] = pd.qcut(merged["score"].rank(method="first"), 4, labels=["Q1 (low)", "Q2", "Q3", "Q4 (high)"])
+    print("\n5. Performance by Conviction Quartile")
+    print(merged.groupby("score_quartile").agg(
+        trades=("ret", "count"),
+        win_rate=("ret", lambda x: (x > 0).mean()),
+        avg_ret=("ret", "mean"),
+        expectancy=("ret", "mean")
+    ).round(4))
+
+# 6. Distribution of returns
+print("\n6. Return Distribution")
+print(trades["ret"].describe().round(4))
+print(f"\n% of trades > +10%: {(trades['ret'] > 0.10).mean()*100:.1f}%")
+print(f"% of trades < -5%:  {(trades['ret'] < -0.05).mean()*100:.1f}%")
