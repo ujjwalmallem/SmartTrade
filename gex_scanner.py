@@ -9,8 +9,13 @@ Native usage:
     python3 gex_scanner.py
 
 NOTE: Signal thresholds, tier base scores, and the GEX bonus weight are
-hand-set, not fitted. Nothing here has been validated against forward
-returns. Treat the ranking as a triage view, not a tested edge.
+hand-set, not fitted. A same-day equity-proxy paper loop lives in
+paper_trading/, and python3 -m paper_trading.backtest_gex replays the
+price-only half of the directional signals against daily OHLC. Neither
+is a walk-forward-validated edge -- treat the ranking as a triage view.
+
+To score live scans (including WALL_PIN / RESISTANCE, which are not
+paper-traded) after they accumulate: python3 -m paper_trading.trade_gex score
 
 Yahoo calls (history, fast_info, calendar, options, option_chain) retry with
 exponential backoff instead of giving up on the first error, since most
@@ -687,6 +692,98 @@ def _empty_row(symbol: str, signal: str, strategy: str, score: float,
     return row
 
 
+def classify_setup(
+    curr_price: float,
+    rsi: float,
+    ema200: float,
+    regime: str,
+    call_wall: float,
+    put_wall: float,
+    gamma_flip: float,
+) -> Dict:
+    """Map price/RSI/EMA + GEX state onto a signal, strategy, stop, and target.
+
+    Earnings and data-availability gating stay in calculate_equity_signal.
+    When walls/flip are NaN, stops/targets fall back to the clamp `near`
+    bounds (same as a live scan that couldn't locate a wall). When `regime`
+    is neither POSITIVE_GEX nor NEGATIVE_GEX, wall/oversold branches still
+    fire (they don't need a regime), and anything leftover is NO_GEX_REGIME
+    so a historical backtest doesn't pretend it saw dealer gamma.
+    """
+    at_call_wall_band = (
+        not np.isnan(call_wall) and
+        (curr_price >= call_wall * 0.985) and
+        (curr_price <= call_wall * 1.020)
+    )
+
+    if rsi < 35 and curr_price >= ema200:
+        signal = "OVERSOLD_BULL_PULLBACK"
+        base_score = 80.0 + min(35.0 - rsi, 10.0)
+        sell_st, buy_st = build_spread_strikes(curr_price, put_wall, "BULL_PUT", 2)
+        strat = f"Bull Put Spread ${sell_st:.1f}/${buy_st:.1f}"
+        stop_loss = clamp_below(put_wall * 0.98 if not np.isnan(put_wall) else np.nan,
+                                curr_price, near=0.02, far=0.08)
+        target_price = clamp_above(np.nan, curr_price, near=0.04, far=0.04)
+
+    elif at_call_wall_band and rsi > 68:
+        signal = "RESISTANCE_PINNED_SHORT_VOL"
+        base_score = 60.0 + min(rsi - 68.0, 10.0)
+        sell_st, buy_st = build_spread_strikes(curr_price, call_wall, "BEAR_CALL", 2)
+        strat = f"Bear Call Spread ${sell_st:.1f}/${buy_st:.1f}"
+        stop_loss = clamp_above(call_wall * 1.02 if not np.isnan(call_wall) else np.nan,
+                                curr_price, near=0.03, far=0.06)
+        target_price = clamp_below(gamma_flip, curr_price, near=0.01, far=0.03)
+
+    elif at_call_wall_band:
+        signal = "WALL_PIN"
+        base_score = 40.0
+        strat = "Iron Condor / Short Volatility"
+        # Upside breach only; a condor's downside leg needs its own level if traded
+        stop_loss = clamp_above(call_wall * 1.02 if not np.isnan(call_wall) else np.nan,
+                                curr_price, near=0.03, far=0.06)
+        target_price = curr_price * 1.005
+
+    elif regime == "POSITIVE_GEX":
+        signal = "DAMPENED_BULL_TREND"
+        base_score = 30.0
+        strat = "Covered Calls / Cash-Secured Puts"
+        stop_loss = clamp_below(gamma_flip, curr_price, near=0.03, far=0.08)
+        target_price = clamp_above(call_wall, curr_price, near=0.02, far=0.10)
+
+    elif regime == "NEGATIVE_GEX":
+        if rsi < 40 and curr_price < ema200:
+            signal = "VOLATILITY_EXPANSION_BEAR"
+            base_score = 75.0 + min(40.0 - rsi, 10.0)
+            buy_st, sell_st = build_spread_strikes(curr_price, put_wall, "BEAR_PUT", 2)
+            strat = f"Bear Put Debit Spread ${buy_st:.1f}/${sell_st:.1f}"
+            ref_stop = gamma_flip if not np.isnan(gamma_flip) else ema200
+            stop_loss = clamp_above(ref_stop, curr_price, near=0.03, far=0.08)
+            target_price = clamp_below(put_wall * 0.95 if not np.isnan(put_wall) else np.nan,
+                                       curr_price, near=0.05, far=0.15)
+        else:
+            signal = "HIGH_VOLATILITY_DANGER_ZONE"
+            base_score = 15.0
+            strat = "Long Gamma / Long Strangles"
+            # Non-directional trade; these levels describe the move size, not a side
+            stop_loss = curr_price * 0.95
+            target_price = curr_price * 1.10
+
+    else:
+        signal = "NO_GEX_REGIME"
+        base_score = 0.0
+        strat = "GEX regime unavailable"
+        stop_loss = np.nan
+        target_price = np.nan
+
+    return {
+        "signal": signal,
+        "base_score": float(base_score),
+        "recommended_strategy": strat,
+        "stop_loss": float(stop_loss) if not np.isnan(stop_loss) else np.nan,
+        "target_price": float(target_price) if not np.isnan(target_price) else np.nan,
+    }
+
+
 def calculate_equity_signal(symbol: str) -> Dict:
     # Earnings check first: cheapest guard, avoids chain fetches on blackout names
     earnings_status = cache.check_earnings_status(symbol, days_threshold=7)
@@ -743,69 +840,16 @@ def calculate_equity_signal(symbol: str) -> Dict:
             gamma_flip=round(float(gamma_flip), 2) if not np.isnan(gamma_flip) else np.nan,
         )
 
-    at_call_wall_band = (
-        not np.isnan(call_wall) and
-        (curr_price >= call_wall * 0.985) and
-        (curr_price <= call_wall * 1.020)
+    classified = classify_setup(
+        float(curr_price), float(rsi), float(ema200),
+        regime, call_wall, put_wall, gamma_flip,
     )
-
-    if rsi < 35 and curr_price >= ema200:
-        signal = "OVERSOLD_BULL_PULLBACK"
-        base_score = 80.0 + min(35.0 - rsi, 10.0)
-        sell_st, buy_st = build_spread_strikes(curr_price, put_wall, "BULL_PUT", 2)
-        strat = f"Bull Put Spread ${sell_st:.1f}/${buy_st:.1f}"
-        stop_loss = clamp_below(put_wall * 0.98 if not np.isnan(put_wall) else np.nan,
-                                curr_price, near=0.02, far=0.08)
-        target_price = clamp_above(np.nan, curr_price, near=0.04, far=0.04)
-
-    elif at_call_wall_band and rsi > 68:
-        signal = "RESISTANCE_PINNED_SHORT_VOL"
-        base_score = 60.0 + min(rsi - 68.0, 10.0)
-        sell_st, buy_st = build_spread_strikes(curr_price, call_wall, "BEAR_CALL", 2)
-        strat = f"Bear Call Spread ${sell_st:.1f}/${buy_st:.1f}"
-        stop_loss = clamp_above(call_wall * 1.02 if not np.isnan(call_wall) else np.nan,
-                                curr_price, near=0.03, far=0.06)
-        target_price = clamp_below(gamma_flip, curr_price, near=0.01, far=0.03)
-
-    elif at_call_wall_band:
-        signal = "WALL_PIN"
-        base_score = 40.0
-        strat = "Iron Condor / Short Volatility"
-        # Upside breach only; a condor's downside leg needs its own level if traded
-        stop_loss = clamp_above(call_wall * 1.02 if not np.isnan(call_wall) else np.nan,
-                                curr_price, near=0.03, far=0.06)
-        target_price = curr_price * 1.005
-
-    elif regime == "POSITIVE_GEX":
-        signal = "DAMPENED_BULL_TREND"
-        base_score = 30.0
-        strat = "Covered Calls / Cash-Secured Puts"
-        stop_loss = clamp_below(gamma_flip, curr_price, near=0.03, far=0.08)
-        target_price = clamp_above(call_wall, curr_price, near=0.02, far=0.10)
-
-    else:  # NEGATIVE_GEX
-        if rsi < 40 and curr_price < ema200:
-            signal = "VOLATILITY_EXPANSION_BEAR"
-            base_score = 75.0 + min(40.0 - rsi, 10.0)
-            buy_st, sell_st = build_spread_strikes(curr_price, put_wall, "BEAR_PUT", 2)
-            strat = f"Bear Put Debit Spread ${buy_st:.1f}/${sell_st:.1f}"
-            ref_stop = gamma_flip if not np.isnan(gamma_flip) else ema200
-            stop_loss = clamp_above(ref_stop, curr_price, near=0.03, far=0.08)
-            target_price = clamp_below(put_wall * 0.95 if not np.isnan(put_wall) else np.nan,
-                                       curr_price, near=0.05, far=0.15)
-        else:
-            signal = "HIGH_VOLATILITY_DANGER_ZONE"
-            base_score = 15.0
-            strat = "Long Gamma / Long Strangles"
-            # Non-directional trade; these levels describe the move size, not a side
-            stop_loss = curr_price * 0.95
-            target_price = curr_price * 1.10
 
     return {
         "symbol": symbol,
-        "signal": signal,
-        "base_score": round(float(base_score), 2),
-        "rank_score": round(float(base_score), 2),
+        "signal": classified["signal"],
+        "base_score": round(float(classified["base_score"]), 2),
+        "rank_score": round(float(classified["base_score"]), 2),
         "has_earnings_data": True,
         "price": round(float(curr_price), 2),
         "rsi": round(float(rsi), 1),
@@ -814,9 +858,11 @@ def calculate_equity_signal(symbol: str) -> Dict:
         "call_wall": round(float(call_wall), 2) if not np.isnan(call_wall) else np.nan,
         "put_wall": round(float(put_wall), 2) if not np.isnan(put_wall) else np.nan,
         "gamma_flip": round(float(gamma_flip), 2) if not np.isnan(gamma_flip) else np.nan,
-        "stop_loss": round(float(stop_loss), 2) if not np.isnan(stop_loss) else np.nan,
-        "target_price": round(float(target_price), 2) if not np.isnan(target_price) else np.nan,
-        "recommended_strategy": strat,
+        "stop_loss": (round(float(classified["stop_loss"]), 2)
+                      if not np.isnan(classified["stop_loss"]) else np.nan),
+        "target_price": (round(float(classified["target_price"]), 2)
+                         if not np.isnan(classified["target_price"]) else np.nan),
+        "recommended_strategy": classified["recommended_strategy"],
     }
 
 

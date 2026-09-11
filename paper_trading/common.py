@@ -10,10 +10,12 @@ it paper-trades the stock as a directional proxy for the signal. Treat the
 P&L here as a rough scorecard for the signal's direction call, not a
 return estimate for the trade a scanner's "recommended_strategy" names.
 
-The ledger is a JSON file: {"open": [...], "closed": [...]}. Each driver
-script (trade_gex.py / trade_er.py) owns its own ledger file; the calling
-shell wrapper is responsible for committing it back to git after a run
-that changes it.
+The ledger is a JSON file: {"open": [...], "closed": [...], "scans": [...]}.
+Each driver script (trade_gex.py / trade_er.py) owns its own ledger file;
+the calling shell wrapper is responsible for committing it back to git
+after a run that changes it. GEX `open` also stores that morning's full
+scan under `scans` so wall/pin setups can be graded later even though
+they are not paper-traded.
 """
 
 import json
@@ -111,3 +113,30 @@ def close_position(ledger: Dict, pos: Dict, exit_price: float, reason: str) -> D
 def todays_closed(ledger: Dict) -> List[Dict]:
     today = today_str()
     return [p for p in ledger["closed"] if p["date"] == today]
+
+
+def _df_records(df) -> List[Dict]:
+    """DataFrame -> JSON-safe list of dicts (NaN becomes null)."""
+    if df is None or getattr(df, "empty", True):
+        return []
+    return json.loads(pd.DataFrame(df).to_json(orient="records", date_format="iso"))
+
+
+def record_scan(ledger: Dict, date: str, setups, residual, avoid) -> Dict:
+    """Store one day's full GEX scan on the ledger, replacing any prior copy.
+
+    Live paper trading only opens the two directional setups. Scoring whether
+    WALL_PIN / RESISTANCE / etc. were right needs the rest of the scan, so
+    we keep it here — the same file the workflow already commits back.
+    """
+    payload = {
+        "date": date,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "setups": _df_records(setups),
+        "residual": _df_records(residual),
+        "avoid": _df_records(avoid),
+    }
+    scans = [s for s in ledger.get("scans", []) if s.get("date") != date]
+    scans.append(payload)
+    ledger["scans"] = scans
+    return payload

@@ -9,23 +9,29 @@ Only signals with a clean directional read get paper-traded:
 WALL_PIN and RESISTANCE_PINNED_SHORT_VOL are premium-selling / range
 setups (Iron Condor, Bear Call Spread) with no honest long/short equity
 proxy, so they're skipped here rather than force-mapped to a direction
-that doesn't represent the signal.
+that doesn't represent the signal. They are still snapshotted on each
+`open` and graded by `score` against that session's OHLC.
 
 Usage:
     python3 -m paper_trading.trade_gex open
     python3 -m paper_trading.trade_gex check
     python3 -m paper_trading.trade_gex close
+    python3 -m paper_trading.trade_gex report
+    python3 -m paper_trading.trade_gex score
 """
 
 import sys
+from collections import defaultdict
 from pathlib import Path
+from typing import Dict, List
 
 import pandas as pd
+import yfinance as yf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gex_scanner as gex
-from paper_trading import common
+from paper_trading import common, evaluate
 
 LEDGER_PATH = str(Path(__file__).resolve().parent / "ledger_gex.json")
 
@@ -38,7 +44,8 @@ MAX_NEW_POSITIONS = 5
 
 def do_open():
     ledger = common.load_ledger(LEDGER_PATH)
-    df_setups, _, _ = gex.generate_top_trades(gex.WATCHLIST)
+    df_setups, df_residual, df_avoid = gex.generate_top_trades(gex.WATCHLIST)
+    common.record_scan(ledger, common.today_str(), df_setups, df_residual, df_avoid)
 
     opened = []
     if not df_setups.empty:
@@ -114,11 +121,120 @@ def do_close():
         print("[paper-gex] EOD close: no trades today")
 
 
-ACTIONS = {"open": do_open, "check": do_check, "close": do_close}
+def do_report():
+    ledger = common.load_ledger(LEDGER_PATH)
+    closed = ledger.get("closed", [])
+    print(evaluate.format_scorecard(
+        evaluate.summarize_trades(closed),
+        title="Live GEX paper ledger (closed trades)",
+    ))
+    if not closed:
+        print("No closed live paper trades yet. Historical read: "
+              "python3 -m paper_trading.backtest_gex")
+    scans = ledger.get("scans", [])
+    print(f"\nStored scans: {len(scans)}"
+          + (f" ({scans[0]['date']} .. {scans[-1]['date']})" if scans else ""))
+    print("Grade stored scans against session OHLC with: "
+          "python3 -m paper_trading.trade_gex score")
+
+
+def _bars_for_symbols(symbols: List[str], start: str, end: str) -> Dict[str, pd.DataFrame]:
+    if not symbols:
+        return {}
+    try:
+        raw = yf.download(
+            symbols, start=start, end=end, auto_adjust=False,
+            group_by="ticker", threads=True, progress=False,
+        )
+    except Exception as exc:
+        print(f"[paper-gex] score download failed: {exc}")
+        return {}
+
+    out: Dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        try:
+            if raw is None or raw.empty:
+                df = pd.DataFrame()
+            elif isinstance(raw.columns, pd.MultiIndex):
+                df = raw[sym] if sym in raw.columns.get_level_values(0) else pd.DataFrame()
+            else:
+                df = raw if len(symbols) == 1 else pd.DataFrame()
+        except Exception:
+            df = pd.DataFrame()
+        if df is None or df.empty:
+            continue
+        df = df.copy()
+        df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
+        out[sym] = df
+    return out
+
+
+def do_score():
+    ledger = common.load_ledger(LEDGER_PATH)
+    scans = ledger.get("scans", [])
+    if not scans:
+        print("[paper-gex] No stored scans. They are written on each `open`.")
+        return
+
+    by_date_rows: Dict[str, List[Dict]] = defaultdict(list)
+    symbols = set()
+    for scan in scans:
+        date = scan["date"]
+        for row in scan.get("setups", []):
+            row = dict(row)
+            row["date"] = date
+            by_date_rows[date].append(row)
+            symbols.add(row["symbol"])
+
+    if not by_date_rows:
+        print("[paper-gex] Stored scans have no setups to grade.")
+        return
+
+    dates = sorted(by_date_rows)
+    # yfinance `end` is exclusive; bump one day so the last scan date is included.
+    end = (pd.Timestamp(dates[-1]) + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+    bars = _bars_for_symbols(sorted(symbols), dates[0], end)
+
+    scores = []
+    missing = 0
+    for date, rows in by_date_rows.items():
+        day = pd.Timestamp(date).normalize()
+        for row in rows:
+            df = bars.get(row["symbol"])
+            if df is None or day not in df.index:
+                missing += 1
+                continue
+            bar = df.loc[day]
+            scores.append(evaluate.score_setup_row(
+                row,
+                float(bar["Open"]), float(bar["High"]),
+                float(bar["Low"]), float(bar["Close"]),
+            ))
+
+    by_signal = evaluate.summarize_scan_scores(scores)
+    print(evaluate.format_scan_scores(by_signal))
+    if missing:
+        print(f"[{missing} row(s) skipped — no OHLC for that symbol/date]")
+    directional = [s["paper_trade"] for s in scores if s.get("paper_trade")]
+    if directional:
+        print()
+        print(evaluate.format_scorecard(
+            evaluate.summarize_trades(directional),
+            title="Directional setups as same-day paper trades",
+        ))
+
+
+ACTIONS = {
+    "open": do_open,
+    "check": do_check,
+    "close": do_close,
+    "report": do_report,
+    "score": do_score,
+}
 
 if __name__ == "__main__":
     action = sys.argv[1] if len(sys.argv) > 1 else ""
     if action not in ACTIONS:
-        print("usage: python3 -m paper_trading.trade_gex open|check|close")
+        print("usage: python3 -m paper_trading.trade_gex open|check|close|report|score")
         sys.exit(1)
     ACTIONS[action]()

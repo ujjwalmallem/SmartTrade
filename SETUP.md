@@ -89,8 +89,8 @@ with the real one (`pwd` inside the repo).
   short; the full ranked/scored table is always printed to stdout (and, for
   ER, also saved to `er_dashboard.csv`).
 - Per each script's own docstring: thresholds and scoring weights are
-  hand-set, not fitted or validated against forward returns. Treat these as
-  triage views, not tested trading signals.
+  hand-set, not fitted. The GEX paper loop and `paper_trading.backtest_gex`
+  are sanity checks on direction, not a tested edge.
 
 ## Paper trading
 
@@ -109,7 +109,8 @@ not a return estimate for the recommended trade.
 - **GEX**: only `OVERSOLD_BULL_PULLBACK` (LONG) and `VOLATILITY_EXPANSION_BEAR`
   (SHORT) get paper-traded, using their real `stop_loss`/`target_price`.
   `WALL_PIN`/`RESISTANCE_PINNED_SHORT_VOL` are skipped — they're premium-selling/range
-  setups with no honest long/short equity proxy.
+  setups with no honest long/short equity proxy. Each `open` still snapshots the
+  full scan into the ledger so those can be graded later (see below).
 - **ER**: LONG only (the whole ER scoring system is built around upside earnings-reaction
   continuation), picks rows with `Src=="ER"`, `Final >= 3.5`, and a real `React Tgt` — same
   cutoff `er_dashboard.py`'s own notification uses. ER has no native stop, so a flat 3%
@@ -124,3 +125,27 @@ Run workflow → choose `open`/`check`/`close`.
 Position sizing, the direction map, and the ER synthetic stop are all hand-set constants
 at the top of `trade_gex.py`/`trade_er.py` — edit them directly if you want different
 values.
+
+### Are the GEX signals right?
+
+Live paper trading only samples days when a directional setup fires, and option-derived
+pieces (GEX regime, walls, gamma flip) cannot be rebuilt from Yahoo/Stooq history.
+Two extra commands fill that gap:
+
+```bash
+# Historical same-day paper replay of the price-only directional rules
+python3 -m paper_trading.backtest_gex
+
+# Live ledger P&L (empty until directional setups actually open)
+python3 -m paper_trading.trade_gex report
+
+# Grade stored morning scans against that session's OHLC
+# (includes WALL_PIN / RESISTANCE, which are not paper-traded)
+python3 -m paper_trading.trade_gex score
+```
+
+`backtest_gex` writes `paper_trading/backtest_gex_results.json`. Read the caveats
+printed at the top of its report before treating the numbers as an edge:
+`OVERSOLD_BULL_PULLBACK` is an exact replay of the live gate (RSI + 200 EMA);
+the bear sleeve is a **technical proxy** that over-fires vs production because
+live `VOLATILITY_EXPANSION_BEAR` also requires `NEGATIVE_GEX`.
