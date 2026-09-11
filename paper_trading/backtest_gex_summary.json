@@ -1,0 +1,210 @@
+{
+  "generated_at": "2026-09-11T15:46:35.888373+00:00",
+  "symbols": [
+    "AAPL",
+    "AMAT",
+    "AMD",
+    "AMZN",
+    "ASML",
+    "BE",
+    "COIN",
+    "DDOG",
+    "GOOGL",
+    "HOOD",
+    "INTC",
+    "IREN",
+    "META",
+    "MSFT",
+    "MSTR",
+    "MU",
+    "NVDA",
+    "ORCL",
+    "PLTR"
+  ],
+  "skip_earnings": false,
+  "caveats": "Caveats (read before treating these numbers as an edge):\n- No historical option chains: walls/GEX/flip are missing. OVERSOLD is an\n  exact replay of the live gate. The bear sleeve is a price-only proxy and\n  will over-fire vs production (live also needs NEGATIVE_GEX).\n- Stops/targets are the no-wall clamp fallbacks, not live wall-anchored\n  levels, so paper P&L is not the options-spread P&L the scanner names.\n- OVERSOLD is held up to 5 sessions (stop/target/TIME); bear is same-day.\n  Consecutive signals on a name already in a trade are skipped.\n- Daily OHLC cannot sequence stop vs target; days where both sit in range\n  are counted as STOP and flagged ambiguous.\n- Earnings blackout matches the live 0-7 day window when Yahoo returns\n  dates; missing calendars mean those names are not filtered.\n- Thresholds are still hand-set. This is a sanity check on direction, not\n  a fitted / walk-forward-validated strategy.",
+  "summary": {
+    "all": {
+      "n": 2090,
+      "wins": 1025,
+      "losses": 1055,
+      "flats": 10,
+      "win_rate": 0.49,
+      "total_pnl": -1689.28,
+      "avg_pnl": -0.81,
+      "avg_win": 23.2,
+      "avg_loss": -24.15,
+      "profit_factor": 0.934,
+      "direction_hit_rate": 0.492,
+      "avg_close_pnl_pct": -0.147,
+      "ambiguous": 6,
+      "by_exit": {
+        "EOD": 1641,
+        "STOP": 181,
+        "TIME": 8,
+        "TARGET": 260
+      },
+      "avg_fwd_1d_pct": -0.404,
+      "avg_fwd_5d_pct": -1.424,
+      "n_fwd_1d": 2090,
+      "n_fwd_5d": 2090
+    },
+    "by_signal": {
+      "OVERSOLD_BULL_PULLBACK": {
+        "n": 120,
+        "wins": 49,
+        "losses": 71,
+        "flats": 0,
+        "win_rate": 0.408,
+        "total_pnl": 495.21,
+        "avg_pnl": 4.13,
+        "avg_win": 38.94,
+        "avg_loss": -19.9,
+        "profit_factor": 1.35,
+        "direction_hit_rate": 0.475,
+        "avg_close_pnl_pct": 0.153,
+        "ambiguous": 2,
+        "by_exit": {
+          "STOP": 68,
+          "TIME": 8,
+          "TARGET": 44
+        },
+        "avg_fwd_1d_pct": 0.395,
+        "avg_fwd_5d_pct": 2.147,
+        "n_fwd_1d": 120,
+        "n_fwd_5d": 120
+      },
+      "VOLATILITY_EXPANSION_BEAR": {
+        "n": 1970,
+        "wins": 976,
+        "losses": 984,
+        "flats": 10,
+        "win_rate": 0.495,
+        "total_pnl": -2184.49,
+        "avg_pnl": -1.11,
+        "avg_win": 22.41,
+        "avg_loss": -24.45,
+        "profit_factor": 0.909,
+        "direction_hit_rate": 0.493,
+        "avg_close_pnl_pct": -0.165,
+        "ambiguous": 4,
+        "by_exit": {
+          "EOD": 1641,
+          "STOP": 113,
+          "TARGET": 216
+        },
+        "avg_fwd_1d_pct": -0.452,
+        "avg_fwd_5d_pct": -1.642,
+        "n_fwd_1d": 1970,
+        "n_fwd_5d": 1970
+      }
+    }
+  },
+  "sensitivities": {
+    "oversold_same_day": {
+      "all": {
+        "n": 178,
+        "wins": 80,
+        "losses": 98,
+        "flats": 0,
+        "win_rate": 0.449,
+        "total_pnl": -22.28,
+        "avg_pnl": -0.13,
+        "avg_win": 16.69,
+        "avg_loss": -13.85,
+        "profit_factor": 0.984,
+        "direction_hit_rate": 0.506,
+        "avg_close_pnl_pct": -0.091,
+        "ambiguous": 2,
+        "by_exit": {
+          "STOP": 54,
+          "EOD": 107,
+          "TARGET": 17
+        },
+        "avg_fwd_1d_pct": 0.348,
+        "avg_fwd_5d_pct": 1.726,
+        "n_fwd_1d": 178,
+        "n_fwd_5d": 177
+      },
+      "by_signal": {
+        "OVERSOLD_BULL_PULLBACK": {
+          "n": 178,
+          "wins": 80,
+          "losses": 98,
+          "flats": 0,
+          "win_rate": 0.449,
+          "total_pnl": -22.28,
+          "avg_pnl": -0.13,
+          "avg_win": 16.69,
+          "avg_loss": -13.85,
+          "profit_factor": 0.984,
+          "direction_hit_rate": 0.506,
+          "avg_close_pnl_pct": -0.091,
+          "ambiguous": 2,
+          "by_exit": {
+            "STOP": 54,
+            "EOD": 107,
+            "TARGET": 17
+          },
+          "avg_fwd_1d_pct": 0.348,
+          "avg_fwd_5d_pct": 1.726,
+          "n_fwd_1d": 178,
+          "n_fwd_5d": 177
+        }
+      }
+    },
+    "oversold_5d_rsi_rising": {
+      "all": {
+        "n": 34,
+        "wins": 12,
+        "losses": 22,
+        "flats": 0,
+        "win_rate": 0.353,
+        "total_pnl": 19.19,
+        "avg_pnl": 0.56,
+        "avg_win": 37.16,
+        "avg_loss": -19.39,
+        "profit_factor": 1.045,
+        "direction_hit_rate": 0.382,
+        "avg_close_pnl_pct": -0.3,
+        "ambiguous": 0,
+        "by_exit": {
+          "STOP": 20,
+          "TIME": 4,
+          "TARGET": 10
+        },
+        "avg_fwd_1d_pct": -1.036,
+        "avg_fwd_5d_pct": 2.253,
+        "n_fwd_1d": 34,
+        "n_fwd_5d": 34
+      },
+      "by_signal": {
+        "OVERSOLD_BULL_PULLBACK": {
+          "n": 34,
+          "wins": 12,
+          "losses": 22,
+          "flats": 0,
+          "win_rate": 0.353,
+          "total_pnl": 19.19,
+          "avg_pnl": 0.56,
+          "avg_win": 37.16,
+          "avg_loss": -19.39,
+          "profit_factor": 1.045,
+          "direction_hit_rate": 0.382,
+          "avg_close_pnl_pct": -0.3,
+          "ambiguous": 0,
+          "by_exit": {
+            "STOP": 20,
+            "TIME": 4,
+            "TARGET": 10
+          },
+          "avg_fwd_1d_pct": -1.036,
+          "avg_fwd_5d_pct": 2.253,
+          "n_fwd_1d": 34,
+          "n_fwd_5d": 34
+        }
+      }
+    }
+  },
+  "report": "=== GEX paper backtest (price-only reconstruction) ===\nCaveats (read before treating these numbers as an edge):\n- No historical option chains: walls/GEX/flip are missing. OVERSOLD is an\n  exact replay of the live gate. The bear sleeve is a price-only proxy and\n  will over-fire vs production (live also needs NEGATIVE_GEX).\n- Stops/targets are the no-wall clamp fallbacks, not live wall-anchored\n  levels, so paper P&L is not the options-spread P&L the scanner names.\n- OVERSOLD is held up to 5 sessions (stop/target/TIME); bear is same-day.\n  Consecutive signals on a name already in a trade are skipped.\n- Daily OHLC cannot sequence stop vs target; days where both sit in range\n  are counted as STOP and flagged ambiguous.\n- Earnings blackout matches the live 0-7 day window when Yahoo returns\n  dates; missing calendars mean those names are not filtered.\n- Thresholds are still hand-set. This is a sanity check on direction, not\n  a fitted / walk-forward-validated strategy.\n\n=== $1,000 equity proxy (live hold rules) ===\nALL: n=2090  win=49.0%  dir-right=49.2%  P&L=$-1689.28  avg=$-0.81  PF=0.934  close-pnl=-0.147%  exits={'EOD': 1641, 'STOP': 181, 'TIME': 8, 'TARGET': 260}  ambiguous=6\nOVERSOLD_BULL_PULLBACK: n=120  win=40.8%  dir-right=47.5%  P&L=$495.21  avg=$4.13  PF=1.35  close-pnl=0.153%  exits={'STOP': 68, 'TIME': 8, 'TARGET': 44}  ambiguous=2\nVOLATILITY_EXPANSION_BEAR: n=1970  win=49.5%  dir-right=49.3%  P&L=$-2184.49  avg=$-1.11  PF=0.909  close-pnl=-0.165%  exits={'EOD': 1641, 'STOP': 113, 'TARGET': 216}  ambiguous=4\n\nHold-to-close forward returns (direction-adjusted, not the paper path):\n  ALL: avg 1d=-0.404% (n=2090)  avg 5d=-1.424% (n=2090)\n  OVERSOLD_BULL_PULLBACK: avg 1d=0.395% (n=120)  avg 5d=2.147% (n=120)\n  VOLATILITY_EXPANSION_BEAR: avg 1d=-0.452% (n=1970)  avg 5d=-1.642% (n=1970)\n\nUniverse: 19 symbols with enough history.\n\n=== Sensitivity: OVERSOLD same-day (old paper rule) ===\nALL: n=178  win=44.9%  dir-right=50.6%  P&L=$-22.28  avg=$-0.13  PF=0.984  close-pnl=-0.091%  exits={'STOP': 54, 'EOD': 107, 'TARGET': 17}  ambiguous=2\nOVERSOLD_BULL_PULLBACK: n=178  win=44.9%  dir-right=50.6%  P&L=$-22.28  avg=$-0.13  PF=0.984  close-pnl=-0.091%  exits={'STOP': 54, 'EOD': 107, 'TARGET': 17}  ambiguous=2\n\n=== Sensitivity: OVERSOLD 5d hold + RSI turning up ===\nALL: n=34  win=35.3%  dir-right=38.2%  P&L=$19.19  avg=$0.56  PF=1.045  close-pnl=-0.3%  exits={'STOP': 20, 'TIME': 4, 'TARGET': 10}  ambiguous=0\nOVERSOLD_BULL_PULLBACK: n=34  win=35.3%  dir-right=38.2%  P&L=$19.19  avg=$0.56  PF=1.045  close-pnl=-0.3%  exits={'STOP': 20, 'TIME': 4, 'TARGET': 10}  ambiguous=0"
+}
