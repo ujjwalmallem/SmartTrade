@@ -89,8 +89,8 @@ with the real one (`pwd` inside the repo).
   short; the full ranked/scored table is always printed to stdout (and, for
   ER, also saved to `er_dashboard.csv`).
 - Per each script's own docstring: thresholds and scoring weights are
-  hand-set, not fitted. The GEX paper loop and `paper_trading.backtest_gex`
-  are sanity checks on direction, not a tested edge.
+  hand-set, not fitted. The GEX/ER paper loops and `paper_trading.backtest_gex`
+  / `backtest_er` are sanity checks on direction, not a tested edge.
 
 ## Paper trading
 
@@ -115,23 +115,28 @@ not a return estimate for the recommended trade.
   full scan into the ledger so those can be graded later (see below).
   Names whose earnings calendar could not be fetched are classified but **not**
   paper-opened (`CONFIRM EARNINGS` prefix, score haircut).
-- **ER**: LONG only (the whole ER scoring system is built around upside earnings-reaction
-  continuation), picks rows with `Src=="ER"`, `Final >= 3.5`, and a real `React Tgt` — same
-  cutoff `er_dashboard.py`'s own notification uses. ER has no native stop, so a flat 3%
-  synthetic stop is used (`ER_STOP_PCT` in `trade_er.py`).
+- **ER**: LONG only. Paper opens *actionable* continuation — `Src=="ER"`, upside
+  gap, `GapAge` ≤ 1 (fresh print or the next session), `EntryScore` ≥ 3.5
+  (Watch cutoff **without** Fol3%, which would be look-ahead), RVOL ≥ 1.8,
+  not Fighting the sector. Stale last-quarter winners with a high `Final` are
+  listed on the dashboard but not re-opened. Held up to **3 sessions** (the
+  dashboard's own follow-through window). Stop is `reaction_stop` (half the
+  gap, clamped 2–6%), target is `React Tgt`. Each `open` snapshots the full
+  dashboard into the ledger.
 
 **Schedule** (weekdays, both sources): OPEN ~9:31 AM ET · CHECK every 30 min ~10:00 AM–3:30
 PM ET (fetches current price per open position, closes on stop/target hit) · CLOSE ~3:55 PM
-ET. GEX `close` only expires holds that have reached `hold_days` (same-day names end today;
-oversold swings stay open). GEX `open` **always** pushes to ntfy, even when nothing
-was paper-traded (today that is usually WALL_PIN / RESISTANCE, which have no
-long/short proxy). A `check` that finds nothing to close is still silent. If the
-9:31 OPEN cron is dropped, the next CHECK runs open first. Manually run any single
-step from the Actions tab → pick the workflow → Run workflow → choose `open`/`check`/`close`.
+ET. `close` only expires holds that have reached `hold_days` (same-day names end today;
+GEX oversold / ER continuation stay open). Both `open` jobs **always** push to ntfy,
+even when nothing was paper-traded. A `check` that finds nothing to close is still
+silent. If the 9:31 OPEN cron is dropped, the next CHECK runs open first. Manually
+run any single step from the Actions tab → pick the workflow → Run workflow →
+choose `open`/`check`/`close`. The ER *dashboard* scan itself is 4:45 PM ET
+(`.github/workflows/daily-er-scan.yml`); paper opens the next morning so the fill
+is the first session after the gap.
 
-Position sizing, the direction map, and the ER synthetic stop are all hand-set constants
-at the top of `trade_gex.py`/`trade_er.py` — edit them directly if you want different
-values.
+Position sizing and hold lengths are hand-set constants in `trade_gex.py` /
+`er_dashboard.py` — edit them directly if you want different values.
 
 ### Are the GEX signals right?
 
@@ -157,3 +162,21 @@ Read the caveats printed at the top of its report before treating the numbers as
 `OVERSOLD_BULL_PULLBACK` is an exact replay of the live gate (RSI + 200 EMA);
 the bear sleeve is a **technical proxy** that over-fires vs production because
 live `VOLATILITY_EXPANSION_BEAR` also requires `NEGATIVE_GEX`.
+
+### Are the ER signals right?
+
+`Final` on the dashboard includes Fol3% — useful for ranking a print after the
+move, not for entering it. Live paper uses `EntryScore` (gap + RVOL + EPS +
+sector, **no** follow-through) and only on a fresh gap. Historical replay:
+
+```bash
+python3 -m paper_trading.backtest_er
+python3 -m paper_trading.trade_er report
+python3 -m paper_trading.trade_er score
+```
+
+`backtest_er` writes `paper_trading/backtest_er_summary.json` (committed) and
+`paper_trading/backtest_er_results.json` (gitignored). It reconstructs every
+earnings-window gap on `CORE_TICKERS`, fills the next open, and holds up to 3
+sessions. EPS / sector RS are *not* in that replay (Yahoo history is incomplete),
+so the live gate is stricter than the backtest universe.
