@@ -1,0 +1,103 @@
+{
+  "generated_at": "2026-09-11T15:33:06.775055+00:00",
+  "symbols": [
+    "AAPL",
+    "AMAT",
+    "AMD",
+    "AMZN",
+    "ASML",
+    "BE",
+    "COIN",
+    "DDOG",
+    "GOOGL",
+    "HOOD",
+    "INTC",
+    "IREN",
+    "META",
+    "MSFT",
+    "MSTR",
+    "MU",
+    "NVDA",
+    "ORCL",
+    "PLTR"
+  ],
+  "skip_earnings": false,
+  "caveats": "Caveats (read before treating these numbers as an edge):\n- No historical option chains: walls/GEX/flip are missing. OVERSOLD is an\n  exact replay of the live gate. The bear sleeve is a price-only proxy and\n  will over-fire vs production (live also needs NEGATIVE_GEX).\n- Stops/targets are the no-wall clamp fallbacks, not live wall-anchored\n  levels, so paper P&L is not the options-spread P&L the scanner names.\n- Daily OHLC cannot sequence stop vs target; days where both sit in range\n  are counted as STOP and flagged ambiguous.\n- Earnings blackout matches the live 0-7 day window when Yahoo returns\n  dates; missing calendars mean those names are not filtered.\n- Thresholds are still hand-set. This is a sanity check on direction, not\n  a fitted / walk-forward-validated strategy.",
+  "summary": {
+    "all": {
+      "n": 2149,
+      "wins": 1057,
+      "losses": 1082,
+      "flats": 10,
+      "win_rate": 0.492,
+      "total_pnl": -2175.22,
+      "avg_pnl": -1.01,
+      "avg_win": 21.99,
+      "avg_loss": -23.49,
+      "profit_factor": 0.914,
+      "direction_hit_rate": 0.495,
+      "avg_close_pnl_pct": -0.157,
+      "ambiguous": 6,
+      "by_exit": {
+        "EOD": 1749,
+        "STOP": 167,
+        "TARGET": 233
+      },
+      "avg_fwd_1d_pct": -0.385,
+      "avg_fwd_5d_pct": -1.363,
+      "n_fwd_1d": 2149,
+      "n_fwd_5d": 2148
+    },
+    "by_signal": {
+      "OVERSOLD_BULL_PULLBACK": {
+        "n": 178,
+        "wins": 80,
+        "losses": 98,
+        "flats": 0,
+        "win_rate": 0.449,
+        "total_pnl": -22.28,
+        "avg_pnl": -0.13,
+        "avg_win": 16.69,
+        "avg_loss": -13.85,
+        "profit_factor": 0.984,
+        "direction_hit_rate": 0.506,
+        "avg_close_pnl_pct": -0.091,
+        "ambiguous": 2,
+        "by_exit": {
+          "STOP": 54,
+          "EOD": 107,
+          "TARGET": 17
+        },
+        "avg_fwd_1d_pct": 0.348,
+        "avg_fwd_5d_pct": 1.728,
+        "n_fwd_1d": 178,
+        "n_fwd_5d": 177
+      },
+      "VOLATILITY_EXPANSION_BEAR": {
+        "n": 1971,
+        "wins": 977,
+        "losses": 984,
+        "flats": 10,
+        "win_rate": 0.496,
+        "total_pnl": -2152.94,
+        "avg_pnl": -1.09,
+        "avg_win": 22.42,
+        "avg_loss": -24.45,
+        "profit_factor": 0.911,
+        "direction_hit_rate": 0.494,
+        "avg_close_pnl_pct": -0.163,
+        "ambiguous": 4,
+        "by_exit": {
+          "EOD": 1642,
+          "STOP": 113,
+          "TARGET": 216
+        },
+        "avg_fwd_1d_pct": -0.451,
+        "avg_fwd_5d_pct": -1.64,
+        "n_fwd_1d": 1971,
+        "n_fwd_5d": 1971
+      }
+    }
+  },
+  "report": "=== GEX paper backtest (price-only reconstruction) ===\nCaveats (read before treating these numbers as an edge):\n- No historical option chains: walls/GEX/flip are missing. OVERSOLD is an\n  exact replay of the live gate. The bear sleeve is a price-only proxy and\n  will over-fire vs production (live also needs NEGATIVE_GEX).\n- Stops/targets are the no-wall clamp fallbacks, not live wall-anchored\n  levels, so paper P&L is not the options-spread P&L the scanner names.\n- Daily OHLC cannot sequence stop vs target; days where both sit in range\n  are counted as STOP and flagged ambiguous.\n- Earnings blackout matches the live 0-7 day window when Yahoo returns\n  dates; missing calendars mean those names are not filtered.\n- Thresholds are still hand-set. This is a sanity check on direction, not\n  a fitted / walk-forward-validated strategy.\n\n=== Same-day $1,000 equity proxy ===\nALL: n=2149  win=49.2%  dir-right=49.5%  P&L=$-2175.22  avg=$-1.01  PF=0.914  close-pnl=-0.157%  exits={'EOD': 1749, 'STOP': 167, 'TARGET': 233}  ambiguous=6\nOVERSOLD_BULL_PULLBACK: n=178  win=44.9%  dir-right=50.6%  P&L=$-22.28  avg=$-0.13  PF=0.984  close-pnl=-0.091%  exits={'STOP': 54, 'EOD': 107, 'TARGET': 17}  ambiguous=2\nVOLATILITY_EXPANSION_BEAR: n=1971  win=49.6%  dir-right=49.4%  P&L=$-2152.94  avg=$-1.09  PF=0.911  close-pnl=-0.163%  exits={'EOD': 1642, 'STOP': 113, 'TARGET': 216}  ambiguous=4\n\nHold-to-close forward returns (direction-adjusted, not the paper path):\n  ALL: avg 1d=-0.385% (n=2149)  avg 5d=-1.363% (n=2148)\n  OVERSOLD_BULL_PULLBACK: avg 1d=0.348% (n=178)  avg 5d=1.728% (n=177)\n  VOLATILITY_EXPANSION_BEAR: avg 1d=-0.451% (n=1971)  avg 5d=-1.64% (n=1971)\n\nUniverse: 19 symbols with enough history."
+}

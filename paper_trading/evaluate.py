@@ -184,7 +184,6 @@ def _fmt_num(x, money=False) -> str:
 
 def format_scorecard(summary: Dict, title: str = "Paper scorecard") -> str:
     lines = [f"=== {title} ==="]
-    order = ["all"] + [f"by_signal:{k}" for k in summary.get("by_signal", {})]
     blocks = [("all", summary["all"])]
     blocks.extend((k, v) for k, v in summary.get("by_signal", {}).items())
     for name, s in blocks:

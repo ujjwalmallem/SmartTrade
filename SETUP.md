@@ -144,8 +144,9 @@ python3 -m paper_trading.trade_gex report
 python3 -m paper_trading.trade_gex score
 ```
 
-`backtest_gex` writes `paper_trading/backtest_gex_results.json`. Read the caveats
-printed at the top of its report before treating the numbers as an edge:
+`backtest_gex` writes `paper_trading/backtest_gex_summary.json` (scorecard, committed
+as a snapshot) and `paper_trading/backtest_gex_results.json` (full trade list, gitignored).
+Read the caveats printed at the top of its report before treating the numbers as an edge:
 `OVERSOLD_BULL_PULLBACK` is an exact replay of the live gate (RSI + 200 EMA);
 the bear sleeve is a **technical proxy** that over-fires vs production because
 live `VOLATILITY_EXPANSION_BEAR` also requires `NEGATIVE_GEX`.

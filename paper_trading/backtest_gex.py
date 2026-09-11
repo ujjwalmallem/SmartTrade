@@ -44,8 +44,13 @@ import gex_scanner as gex
 from paper_trading import evaluate
 
 RESULTS_PATH = Path(__file__).resolve().parent / "backtest_gex_results.json"
+SUMMARY_PATH = Path(__file__).resolve().parent / "backtest_gex_summary.json"
 EARNINGS_BLACKOUT_DAYS = 7
 MIN_BARS = 200
+# EMA200 / RSI need a filled-in window; skip this many sessions from the
+# start of the downloaded series before emitting trades.
+INDICATOR_WARMUP = 250
+HISTORY_PERIOD = "5y"
 
 
 def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
@@ -66,11 +71,11 @@ def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 def load_history(symbols: List[str]) -> Dict[str, pd.DataFrame]:
     """Batch Yahoo download with per-symbol Stooq fallback."""
     hist: Dict[str, pd.DataFrame] = {}
-    print(f"Downloading {len(symbols)} symbols (Yahoo, 3y)...")
+    print(f"Downloading {len(symbols)} symbols (Yahoo, {HISTORY_PERIOD})...")
     try:
         raw = yf.download(
             symbols,
-            period="3y",
+            period=HISTORY_PERIOD,
             auto_adjust=False,
             group_by="ticker",
             threads=True,
@@ -144,8 +149,9 @@ def backtest_symbol(
     trades: List[Dict] = []
     n = len(df)
     earnings = earnings or set()
+    start_i = max(INDICATOR_WARMUP, MIN_BARS) - 1
 
-    for i in range(n - 1):
+    for i in range(start_i, n - 1):
         row = df.iloc[i]
         nxt = df.iloc[i + 1]
         rsi = row.get("RSI", np.nan)
@@ -189,14 +195,18 @@ def backtest_symbol(
         if not np.isfinite(entry) or entry <= 0:
             continue
 
-        # Rebuild stop/target off the fill so they sit the same distance from
-        # entry that a live 9:31 open would use (scanner prices the stop off
-        # the spot it traded, not the prior close).
+        # Re-check the gate at the fill (live uses 9:31 spot, not the prior
+        # close). A gap through the EMA means this morning's scan would not
+        # have printed the same directional setup.
+        fill_regime = "NEGATIVE_GEX" if direction == "SHORT" else "NO_GEX"
         filled = gex.classify_setup(
             entry, float(rsi), float(ema),
-            "NEGATIVE_GEX" if direction == "SHORT" else "NO_GEX",
-            np.nan, np.nan, np.nan,
+            fill_regime, np.nan, np.nan, np.nan,
         )
+        if filled["signal"] != signal:
+            continue
+        if not np.isfinite(filled["stop_loss"]) or not np.isfinite(filled["target_price"]):
+            continue
 
         trade_day = pd.Timestamp(df.index[i + 1]).tz_localize(None).normalize()
         extra = {
@@ -315,7 +325,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--skip-earnings", action="store_true",
                         help="Do not filter the live 7-day earnings blackout")
     parser.add_argument("--out", default=str(RESULTS_PATH),
-                        help="Where to write the JSON results")
+                        help="Where to write the full JSON results (includes trades)")
+    parser.add_argument("--summary-out", default=str(SUMMARY_PATH),
+                        help="Where to write the summary JSON (no trade list)")
     args = parser.parse_args(argv)
 
     payload = run_backtest(list(gex.WATCHLIST), skip_earnings=args.skip_earnings)
@@ -325,6 +337,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     out = Path(args.out)
     out.write_text(json.dumps(payload, indent=2, default=str) + "\n")
     print(f"\nWrote {out}")
+    summary_path = Path(args.summary_out)
+    slim = {k: v for k, v in payload.items() if k != "trades"}
+    summary_path.write_text(json.dumps(slim, indent=2, default=str) + "\n")
+    print(f"Wrote {summary_path}")
     return 0
 
 

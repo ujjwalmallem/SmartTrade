@@ -147,7 +147,7 @@ class ScanScoreTests(unittest.TestCase):
         self.assertFalse(scored["right"])
 
 
-def _grind_then_dump(n_up=240, start=100.0) -> pd.DataFrame:
+def _grind_then_dump(n_up=320, start=100.0) -> pd.DataFrame:
     """Slow grind up (keeps price above a 200 EMA) then a sharp dump to tank RSI."""
     closes = []
     p = start
@@ -177,6 +177,22 @@ class BacktestWalkTests(unittest.TestCase):
         self.assertTrue(trades, "expected at least one OVERSOLD long on the dump")
         self.assertTrue(all(t["signal"] == "OVERSOLD_BULL_PULLBACK" for t in trades))
         self.assertTrue(all(t["direction"] == "LONG" for t in trades))
+        self.assertTrue(all(t["stop_loss"] is not None for t in trades))
+
+    def test_gap_below_ema_is_not_filled(self):
+        """Prior close is oversold-above-EMA; next open gaps under the EMA."""
+        df = _grind_then_dump()
+        last = df.index[-1]
+        dump_close = float(df.iloc[-2]["Close"])
+        df.loc[last, "Open"] = dump_close * 0.5
+        df.loc[last, "High"] = dump_close * 0.5
+        df.loc[last, "Low"] = dump_close * 0.4
+        df.loc[last, "Close"] = dump_close * 0.45
+        trades = backtest_symbol("FAKE", df, earnings=set(), include_bear_proxy=False)
+        self.assertFalse(
+            any(abs(t["entry_price"] - dump_close * 0.5) < 1e-6 for t in trades),
+            "gap-below-EMA open should not be filled",
+        )
 
     def test_earnings_blackout_matches_live_window(self):
         ed = pd.Timestamp("2026-09-15")
