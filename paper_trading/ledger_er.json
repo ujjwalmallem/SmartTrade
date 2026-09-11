@@ -1,0 +1,65 @@
+{
+  "open": [
+    {
+      "symbol": "PLTR",
+      "direction": "LONG",
+      "signal": "ER Final=7.9",
+      "date": "2026-09-11",
+      "entry_time": "2026-09-11T00:19:32.188725+00:00",
+      "entry_price": 165.86,
+      "shares": 6.0292,
+      "size_usd": 1000.0,
+      "stop_loss": 160.8842,
+      "target_price": 179.18
+    },
+    {
+      "symbol": "ARM",
+      "direction": "LONG",
+      "signal": "ER Final=6.5",
+      "date": "2026-09-11",
+      "entry_time": "2026-09-11T00:19:32.188791+00:00",
+      "entry_price": 254.18,
+      "shares": 3.9342,
+      "size_usd": 1000.0,
+      "stop_loss": 246.5546,
+      "target_price": 271.02
+    },
+    {
+      "symbol": "MSFT",
+      "direction": "LONG",
+      "signal": "ER Final=6.5",
+      "date": "2026-09-11",
+      "entry_time": "2026-09-11T00:19:32.188860+00:00",
+      "entry_price": 492.44,
+      "shares": 2.0307,
+      "size_usd": 1000.0,
+      "stop_loss": 477.6668,
+      "target_price": 523.34
+    },
+    {
+      "symbol": "SNOW",
+      "direction": "LONG",
+      "signal": "ER Final=6.2",
+      "date": "2026-09-11",
+      "entry_time": "2026-09-11T00:19:32.188917+00:00",
+      "entry_price": 329.72,
+      "shares": 3.0329,
+      "size_usd": 1000.0,
+      "stop_loss": 319.8284,
+      "target_price": 369.56
+    },
+    {
+      "symbol": "MU",
+      "direction": "LONG",
+      "signal": "ER Final=5.5",
+      "date": "2026-09-11",
+      "entry_time": "2026-09-11T00:19:32.188967+00:00",
+      "entry_price": 977.41,
+      "shares": 1.0231,
+      "size_usd": 1000.0,
+      "stop_loss": 948.0877,
+      "target_price": 1054.8
+    }
+  ],
+  "closed": []
+}
