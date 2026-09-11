@@ -1,0 +1,246 @@
+{
+  "generated_at": "2026-09-11T19:29:55.318667+00:00",
+  "symbols": [
+    "AAPL",
+    "AMAT",
+    "AMD",
+    "AMZN",
+    "ARM",
+    "ASML",
+    "AVGO",
+    "BE",
+    "CRWD",
+    "DDOG",
+    "GOOGL",
+    "IBM",
+    "INTC",
+    "MDB",
+    "META",
+    "MRVL",
+    "MSFT",
+    "MU",
+    "NET",
+    "NVDA",
+    "ORCL",
+    "PLTR",
+    "QCOM",
+    "SNDK",
+    "SNOW",
+    "STX",
+    "TSLA",
+    "TXN",
+    "WDC"
+  ],
+  "caveats": "Caveats (read before treating these numbers as an edge):\n- Signal is the earnings-window gap + RVOL only. Live EntryScore also adds\n  EPS surprise, short interest, and sector RS, so production opens fewer\n  names than this replay.\n- Fol3% is never used as an input (that would be look-ahead). Final>=3.5\n  on the dashboard often includes already-realized follow-through; those\n  stale prints are not in this universe.\n- Fill is the session after the gap (9:31 paper open). Gap-day close is\n  not traded.\n- No options: $1,000 long equity proxy vs React Tgt / native stop.\n- Daily OHLC cannot sequence stop vs target; both-in-range days are STOP\n  and flagged ambiguous.\n- Thresholds are still hand-set. Sanity check on direction, not a fitted\n  walk-forward edge.",
+  "summary": {
+    "all": {
+      "n": 47,
+      "wins": 24,
+      "losses": 23,
+      "flats": 0,
+      "win_rate": 0.511,
+      "total_pnl": 336.46,
+      "avg_pnl": 7.16,
+      "avg_win": 56.55,
+      "avg_loss": -44.38,
+      "profit_factor": 1.33,
+      "direction_hit_rate": 0.511,
+      "avg_close_pnl_pct": 1.0,
+      "ambiguous": 0,
+      "by_exit": {
+        "TARGET": 14,
+        "TIME": 18,
+        "STOP": 15
+      },
+      "avg_fwd_1d_pct": 1.176,
+      "n_fwd_1d": 47,
+      "avg_fwd_3d_pct": 1.163,
+      "n_fwd_3d": 47
+    },
+    "by_signal": {
+      "ER_CONTINUATION": {
+        "n": 47,
+        "wins": 24,
+        "losses": 23,
+        "flats": 0,
+        "win_rate": 0.511,
+        "total_pnl": 336.46,
+        "avg_pnl": 7.16,
+        "avg_win": 56.55,
+        "avg_loss": -44.38,
+        "profit_factor": 1.33,
+        "direction_hit_rate": 0.511,
+        "avg_close_pnl_pct": 1.0,
+        "ambiguous": 0,
+        "by_exit": {
+          "TARGET": 14,
+          "TIME": 18,
+          "STOP": 15
+        },
+        "avg_fwd_1d_pct": 1.176,
+        "n_fwd_1d": 47,
+        "avg_fwd_3d_pct": 1.163,
+        "n_fwd_3d": 47
+      }
+    }
+  },
+  "sensitivities": {
+    "same_day_gap_stop": {
+      "all": {
+        "n": 47,
+        "wins": 21,
+        "losses": 26,
+        "flats": 0,
+        "win_rate": 0.447,
+        "total_pnl": 46.11,
+        "avg_pnl": 0.98,
+        "avg_win": 38.22,
+        "avg_loss": -29.1,
+        "profit_factor": 1.061,
+        "direction_hit_rate": 0.447,
+        "avg_close_pnl_pct": 0.106,
+        "ambiguous": 0,
+        "by_exit": {
+          "EOD": 35,
+          "STOP": 8,
+          "TARGET": 4
+        },
+        "avg_fwd_1d_pct": 1.176,
+        "n_fwd_1d": 47,
+        "avg_fwd_3d_pct": 1.163,
+        "n_fwd_3d": 47
+      },
+      "by_signal": {
+        "ER_CONTINUATION": {
+          "n": 47,
+          "wins": 21,
+          "losses": 26,
+          "flats": 0,
+          "win_rate": 0.447,
+          "total_pnl": 46.11,
+          "avg_pnl": 0.98,
+          "avg_win": 38.22,
+          "avg_loss": -29.1,
+          "profit_factor": 1.061,
+          "direction_hit_rate": 0.447,
+          "avg_close_pnl_pct": 0.106,
+          "ambiguous": 0,
+          "by_exit": {
+            "EOD": 35,
+            "STOP": 8,
+            "TARGET": 4
+          },
+          "avg_fwd_1d_pct": 1.176,
+          "n_fwd_1d": 47,
+          "avg_fwd_3d_pct": 1.163,
+          "n_fwd_3d": 47
+        }
+      }
+    },
+    "hold_3d_flat_3pct_stop": {
+      "all": {
+        "n": 47,
+        "wins": 17,
+        "losses": 30,
+        "flats": 0,
+        "win_rate": 0.362,
+        "total_pnl": 19.77,
+        "avg_pnl": 0.42,
+        "avg_win": 54.37,
+        "avg_loss": -30.15,
+        "profit_factor": 1.022,
+        "direction_hit_rate": 0.447,
+        "avg_close_pnl_pct": 0.372,
+        "ambiguous": 0,
+        "by_exit": {
+          "TARGET": 10,
+          "STOP": 27,
+          "TIME": 10
+        },
+        "avg_fwd_1d_pct": 1.176,
+        "n_fwd_1d": 47,
+        "avg_fwd_3d_pct": 1.163,
+        "n_fwd_3d": 47
+      },
+      "by_signal": {
+        "ER_CONTINUATION": {
+          "n": 47,
+          "wins": 17,
+          "losses": 30,
+          "flats": 0,
+          "win_rate": 0.362,
+          "total_pnl": 19.77,
+          "avg_pnl": 0.42,
+          "avg_win": 54.37,
+          "avg_loss": -30.15,
+          "profit_factor": 1.022,
+          "direction_hit_rate": 0.447,
+          "avg_close_pnl_pct": 0.372,
+          "ambiguous": 0,
+          "by_exit": {
+            "TARGET": 10,
+            "STOP": 27,
+            "TIME": 10
+          },
+          "avg_fwd_1d_pct": 1.176,
+          "n_fwd_1d": 47,
+          "avg_fwd_3d_pct": 1.163,
+          "n_fwd_3d": 47
+        }
+      }
+    },
+    "loose_upside_rvol_3d": {
+      "all": {
+        "n": 79,
+        "wins": 43,
+        "losses": 36,
+        "flats": 0,
+        "win_rate": 0.544,
+        "total_pnl": 277.94,
+        "avg_pnl": 3.52,
+        "avg_win": 39.57,
+        "avg_loss": -39.55,
+        "profit_factor": 1.195,
+        "direction_hit_rate": 0.532,
+        "avg_close_pnl_pct": 0.41,
+        "ambiguous": 1,
+        "by_exit": {
+          "TIME": 24,
+          "TARGET": 27,
+          "STOP": 28
+        },
+        "avg_fwd_1d_pct": 0.422,
+        "n_fwd_1d": 79,
+        "avg_fwd_3d_pct": 1.423,
+        "n_fwd_3d": 79
+      },
+      "by_signal": {
+        "ER_CONTINUATION": {
+          "n": 79,
+          "wins": 43,
+          "losses": 36,
+          "flats": 0,
+          "win_rate": 0.544,
+          "total_pnl": 277.94,
+          "avg_pnl": 3.52,
+          "avg_win": 39.57,
+          "avg_loss": -39.55,
+          "profit_factor": 1.195,
+          "direction_hit_rate": 0.532,
+          "avg_close_pnl_pct": 0.41,
+          "ambiguous": 1,
+          "by_exit": {
+            "TIME": 24,
+            "TARGET": 27,
+            "STOP": 28
+          },
+          "avg_fwd_1d_pct": 0.422,
+          "n_fwd_1d": 79,
+          "avg_fwd_3d_pct": 1.423,
+          "n_fwd_3d": 79
+        }
+      }
+    }
+  },
+  "report": "=== ER paper backtest (gap+RVOL reconstruction) ===\nCaveats (read before treating these numbers as an edge):\n- Signal is the earnings-window gap + RVOL only. Live EntryScore also adds\n  EPS surprise, short interest, and sector RS, so production opens fewer\n  names than this replay.\n- Fol3% is never used as an input (that would be look-ahead). Final>=3.5\n  on the dashboard often includes already-realized follow-through; those\n  stale prints are not in this universe.\n- Fill is the session after the gap (9:31 paper open). Gap-day close is\n  not traded.\n- No options: $1,000 long equity proxy vs React Tgt / native stop.\n- Daily OHLC cannot sequence stop vs target; both-in-range days are STOP\n  and flagged ambiguous.\n- Thresholds are still hand-set. Sanity check on direction, not a fitted\n  walk-forward edge.\n\n=== $1,000 long equity proxy (live hold rules) ===\nALL: n=47  win=51.1%  dir-right=51.1%  P&L=$336.46  avg=$7.16  PF=1.33  close-pnl=1.0%  exits={'TARGET': 14, 'TIME': 18, 'STOP': 15}  ambiguous=0\nER_CONTINUATION: n=47  win=51.1%  dir-right=51.1%  P&L=$336.46  avg=$7.16  PF=1.33  close-pnl=1.0%  exits={'TARGET': 14, 'TIME': 18, 'STOP': 15}  ambiguous=0\n\nHold-to-close forward returns (not the paper path):\n  ALL: avg 1d=1.176% (n=47)  avg 3d=1.163% (n=47)\n  ER_CONTINUATION: avg 1d=1.176% (n=47)  avg 3d=1.163% (n=47)\n\nUniverse: 29 symbols with enough history.\n\n=== Sensitivity: live gate, same-day (old paper hold) ===\nALL: n=47  win=44.7%  dir-right=44.7%  P&L=$46.11  avg=$0.98  PF=1.061  close-pnl=0.106%  exits={'EOD': 35, 'STOP': 8, 'TARGET': 4}  ambiguous=0\nER_CONTINUATION: n=47  win=44.7%  dir-right=44.7%  P&L=$46.11  avg=$0.98  PF=1.061  close-pnl=0.106%  exits={'EOD': 35, 'STOP': 8, 'TARGET': 4}  ambiguous=0\n\n=== Sensitivity: live gate, 3d hold, old flat 3% stop ===\nALL: n=47  win=36.2%  dir-right=44.7%  P&L=$19.77  avg=$0.42  PF=1.022  close-pnl=0.372%  exits={'TARGET': 10, 'STOP': 27, 'TIME': 10}  ambiguous=0\nER_CONTINUATION: n=47  win=36.2%  dir-right=44.7%  P&L=$19.77  avg=$0.42  PF=1.022  close-pnl=0.372%  exits={'TARGET': 10, 'STOP': 27, 'TIME': 10}  ambiguous=0\n\n=== Sensitivity: any upside ER gap with RVOL>=1.8, 3d gap-stop ===\nALL: n=79  win=54.4%  dir-right=53.2%  P&L=$277.94  avg=$3.52  PF=1.195  close-pnl=0.41%  exits={'TIME': 24, 'TARGET': 27, 'STOP': 28}  ambiguous=1\nER_CONTINUATION: n=79  win=54.4%  dir-right=53.2%  P&L=$277.94  avg=$3.52  PF=1.195  close-pnl=0.41%  exits={'TIME': 24, 'TARGET': 27, 'STOP': 28}  ambiguous=1"
+}
