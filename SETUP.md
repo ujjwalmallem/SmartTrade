@@ -8,6 +8,10 @@ This repo has two independent scanners, each with its own script, its own
 | Gamma exposure (GEX) | `gex_scanner.py` | `run_gex_scan.sh` | `.github/workflows/daily-gex-scan.yml` | `smarttrade-gex-bb4b87815d16` |
 | Earnings reaction (ER) | `er_dashboard.py` | `run_er_scan.sh` | `.github/workflows/daily-er-scan.yml` | `smarttrade-er-7bfbe66211d7` |
 
+On top of that, each scanner also has a **paper-trading** loop that opens
+positions near market open and closes them by end of day — see
+[Paper trading](#paper-trading) below.
+
 Both are live on GitHub Actions already (see below) — local setup is only
 needed if you also want to run them on your own machine.
 
@@ -79,7 +83,7 @@ with the real one (`pwd` inside the repo).
 
 ## Notes
 
-- GEX watchlist: edit `watchlist` near the bottom of `gex_scanner.py`.
+- GEX watchlist: edit `WATCHLIST` near the bottom of `gex_scanner.py`.
 - ER watchlist: edit `CORE_TICKERS` near the top of `er_dashboard.py`.
 - Both push notifications are capped to the top few results to keep them
   short; the full ranked/scored table is always printed to stdout (and, for
@@ -87,3 +91,36 @@ with the real one (`pwd` inside the repo).
 - Per each script's own docstring: thresholds and scoring weights are
   hand-set, not fitted or validated against forward returns. Treat these as
   triage views, not tested trading signals.
+
+## Paper trading
+
+Each scanner also drives its own same-day paper-trading loop: `paper_trading/trade_gex.py`
+and `paper_trading/trade_er.py`, scheduled via `.github/workflows/paper-trading-gex.yml`
+and `paper-trading-er.yml`. State lives in `paper_trading/ledger_gex.json` /
+`ledger_er.json`, committed back to `develop` by a bot commit after any run that
+changes it (`run_paper_trading.sh` handles the commit+push).
+
+**What it trades**: the underlying stock at spot price as a directional proxy for
+the signal — fixed $1,000 paper-notional per position, long or short. It does
+**not** simulate the actual options strategy each scanner recommends (spread
+pricing, IV, fills); treat the P&L as a scorecard for the signal's direction call,
+not a return estimate for the recommended trade.
+
+- **GEX**: only `OVERSOLD_BULL_PULLBACK` (LONG) and `VOLATILITY_EXPANSION_BEAR`
+  (SHORT) get paper-traded, using their real `stop_loss`/`target_price`.
+  `WALL_PIN`/`RESISTANCE_PINNED_SHORT_VOL` are skipped — they're premium-selling/range
+  setups with no honest long/short equity proxy.
+- **ER**: LONG only (the whole ER scoring system is built around upside earnings-reaction
+  continuation), picks rows with `Src=="ER"`, `Final >= 3.5`, and a real `React Tgt` — same
+  cutoff `er_dashboard.py`'s own notification uses. ER has no native stop, so a flat 3%
+  synthetic stop is used (`ER_STOP_PCT` in `trade_er.py`).
+
+**Schedule** (weekdays, both sources): OPEN ~9:31 AM ET · CHECK every 30 min ~10:00 AM–3:30
+PM ET (fetches current price per open position, closes on stop/target hit) · CLOSE (force
+EOD) ~3:55 PM ET, before the 4pm market close. A `check` that finds nothing to close is
+silent — no push. Manually run any single step from the Actions tab → pick the workflow →
+Run workflow → choose `open`/`check`/`close`.
+
+Position sizing, the direction map, and the ER synthetic stop are all hand-set constants
+at the top of `trade_gex.py`/`trade_er.py` — edit them directly if you want different
+values.

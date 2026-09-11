@@ -928,20 +928,20 @@ def generate_top_trades(symbols_list: List[str]) -> Tuple[pd.DataFrame, pd.DataF
 # ==========================================
 # 8. COLAB EXECUTION BLOCK
 # ==========================================
-if __name__ == "__main__":
-    # Duplicates are removed automatically, so a messy list is fine.
-    #
-    # CAUTION on leveraged ETFs (MSTU, SOXL, TQQQ, etc.): they have no meaningful
-    # market cap, so gex_bps comes back NaN and the GEX term goes neutral for them.
-    # Their RSI and 200 EMA are also distorted by daily-reset volatility decay, so
-    # the technical thresholds here do not mean what they mean on an equity.
-    watchlist = [
-        "AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA",
-        "AMD", "AMAT", "ASML", "DDOG", "HOOD", "MSTR", "ORCL", "MU",
-        "INTC", "COIN", "PLTR", "IREN", "BE"
-    ]
+# Duplicates are removed automatically, so a messy list is fine.
+#
+# CAUTION on leveraged ETFs (MSTU, SOXL, TQQQ, etc.): they have no meaningful
+# market cap, so gex_bps comes back NaN and the GEX term goes neutral for them.
+# Their RSI and 200 EMA are also distorted by daily-reset volatility decay, so
+# the technical thresholds here do not mean what they mean on an equity.
+WATCHLIST = [
+    "AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA",
+    "AMD", "AMAT", "ASML", "DDOG", "HOOD", "MSTR", "ORCL", "MU",
+    "INTC", "COIN", "PLTR", "IREN", "BE"
+]
 
-    df_setups, df_residual, df_avoid = generate_top_trades(watchlist)
+if __name__ == "__main__":
+    df_setups, df_residual, df_avoid = generate_top_trades(WATCHLIST)
 
     pd.set_option('display.max_columns', None)
     pd.set_option('display.width', 1000)

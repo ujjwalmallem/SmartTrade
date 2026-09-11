@@ -1,0 +1,54 @@
+name: Paper Trading - ER
+
+on:
+  schedule:
+    - cron: "31 13 * * 1-5"        # 9:31 AM ET - OPEN (just after market open)
+    - cron: "0,30 14-19 * * 1-5"   # every 30 min, ~10:00 AM - 3:30 PM ET - CHECK stop/target
+    - cron: "55 19 * * 1-5"        # 3:55 PM ET - CLOSE (force EOD, before the 4pm close)
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to run"
+        type: choice
+        options: [open, check, close]
+        default: check
+
+permissions:
+  contents: write
+
+concurrency:
+  group: paper-trading-er
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Determine action
+        id: action
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "action=${{ github.event.inputs.action }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "31 13 * * 1-5" ]; then
+            echo "action=open" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "55 19 * * 1-5" ]; then
+            echo "action=close" >> "$GITHUB_OUTPUT"
+          else
+            echo "action=check" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run paper trading
+        run: bash run_paper_trading.sh er ${{ steps.action.outputs.action }}

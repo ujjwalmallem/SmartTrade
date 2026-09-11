@@ -223,6 +223,25 @@ def fill_missing_close_columns(px, symbols, min_sessions=21):
     return px
 
 
+def get_current_price(ticker):
+    """Live-ish spot price for one symbol: Yahoo fast_info with retries,
+    falling back to Stooq's latest close. Returns NaN if both fail."""
+    def _fast_price():
+        p = yf.Ticker(ticker).fast_info["lastPrice"]
+        if p is None or not np.isfinite(p) or p <= 0:
+            raise ValueError("no usable lastPrice")
+        return float(p)
+
+    price = with_retries(_fast_price, label=f"{ticker} fast_info.lastPrice")
+    if price is not None:
+        return price
+
+    hist = fetch_stooq_history(ticker, days=10)
+    if hist is not None and not hist.empty:
+        return float(hist["Close"].iloc[-1])
+    return np.nan
+
+
 # ====================== EARNINGS DATES ======================
 def get_earnings_dates(ticker):
     """(last_reported, next_scheduled) as tz-naive Timestamps, or (None, None)."""
