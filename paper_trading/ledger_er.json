@@ -1,5 +1,6 @@
 {
-  "open": [
+  "open": [],
+  "closed": [
     {
       "symbol": "PLTR",
       "direction": "LONG",
@@ -10,7 +11,12 @@
       "shares": 6.0292,
       "size_usd": 1000.0,
       "stop_loss": 160.8842,
-      "target_price": 179.18
+      "target_price": 179.18,
+      "exit_time": "2026-09-11T00:20:27.453566+00:00",
+      "exit_price": 165.86,
+      "exit_reason": "EOD",
+      "pnl_usd": 0.0,
+      "pnl_pct": 0.0
     },
     {
       "symbol": "ARM",
@@ -22,7 +28,12 @@
       "shares": 3.9342,
       "size_usd": 1000.0,
       "stop_loss": 246.5546,
-      "target_price": 271.02
+      "target_price": 271.02,
+      "exit_time": "2026-09-11T00:20:27.678276+00:00",
+      "exit_price": 254.18,
+      "exit_reason": "EOD",
+      "pnl_usd": 0.0,
+      "pnl_pct": 0.0
     },
     {
       "symbol": "MSFT",
@@ -34,7 +45,12 @@
       "shares": 2.0307,
       "size_usd": 1000.0,
       "stop_loss": 477.6668,
-      "target_price": 523.34
+      "target_price": 523.34,
+      "exit_time": "2026-09-11T00:20:27.994515+00:00",
+      "exit_price": 492.44,
+      "exit_reason": "EOD",
+      "pnl_usd": 0.0,
+      "pnl_pct": 0.0
     },
     {
       "symbol": "SNOW",
@@ -46,7 +62,12 @@
       "shares": 3.0329,
       "size_usd": 1000.0,
       "stop_loss": 319.8284,
-      "target_price": 369.56
+      "target_price": 369.56,
+      "exit_time": "2026-09-11T00:20:28.337489+00:00",
+      "exit_price": 329.72,
+      "exit_reason": "EOD",
+      "pnl_usd": 0.0,
+      "pnl_pct": 0.0
     },
     {
       "symbol": "MU",
@@ -58,8 +79,12 @@
       "shares": 1.0231,
       "size_usd": 1000.0,
       "stop_loss": 948.0877,
-      "target_price": 1054.8
+      "target_price": 1054.8,
+      "exit_time": "2026-09-11T00:20:28.611307+00:00",
+      "exit_price": 977.41,
+      "exit_reason": "EOD",
+      "pnl_usd": 0.0,
+      "pnl_pct": 0.0
     }
-  ],
-  "closed": []
+  ]
 }
