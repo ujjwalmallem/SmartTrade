@@ -255,7 +255,9 @@ def _finite(value) -> Optional[float]:
     return v if np.isfinite(v) else None
 
 
-def score_setup_row(row: Dict, bar_open: float, high: float, low: float, close: float) -> Dict:
+def score_setup_row(row: Dict, bar_open: float, high: float, low: float, close: float,
+                    hold_bars: Optional[List[Tuple[str, float, float, float, float]]] = None,
+                    max_days: int = 1) -> Dict:
     """Grade one scan row against that session's OHLC.
 
     Directional setups reuse the paper path. Range/pin setups are graded on
@@ -280,14 +282,19 @@ def score_setup_row(row: Dict, bar_open: float, high: float, low: float, close: 
         result["reason"] = "no_bar"
         return result
 
-    if signal == "OVERSOLD_BULL_PULLBACK":
+    if signal in ("OVERSOLD_BULL_PULLBACK", "ER_CONTINUATION"):
         trade = build_closed_trade(
             row["symbol"], "LONG", signal, row.get("date") or "",
             bar_open, stop, target, bar_open, high, low, close,
+            hold_bars=hold_bars, max_days=max_days,
         )
         result["paper_trade"] = trade
         result["right"] = trade["direction_right"]
-        result["reason"] = "same-day close > entry (long)"
+        result["reason"] = (
+            "hold close > entry (long continuation)"
+            if signal == "ER_CONTINUATION"
+            else "same-day close > entry (long)"
+        )
         return result
 
     if signal == "VOLATILITY_EXPANSION_BEAR":
