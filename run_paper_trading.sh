@@ -14,12 +14,19 @@ ACTION="${2:-}"
 case "$SOURCE" in
     gex) export NTFY_TOPIC="smarttrade-gex-bb4b87815d16"; MODULE="paper_trading.trade_gex" ;;
     er)  export NTFY_TOPIC="smarttrade-er-7bfbe66211d7";  MODULE="paper_trading.trade_er" ;;
-    *) echo "usage: run_paper_trading.sh <gex|er> <open|check|close>"; exit 1 ;;
+    *) echo "usage: run_paper_trading.sh <gex|er> <open|check|close|report|score>"; exit 1 ;;
 esac
 
 case "$ACTION" in
     open|check|close) ;;
-    *) echo "usage: run_paper_trading.sh <gex|er> <open|check|close>"; exit 1 ;;
+    report|score)
+        if [ -d "venv" ]; then
+            source venv/bin/activate
+        fi
+        python3 -m "$MODULE" "$ACTION"
+        exit 0
+        ;;
+    *) echo "usage: run_paper_trading.sh <gex|er> <open|check|close|report|score>"; exit 1 ;;
 esac
 
 if [ -d "venv" ]; then

@@ -119,11 +119,26 @@ def do_close():
         print("[paper-er] EOD close: no trades today")
 
 
-ACTIONS = {"open": do_open, "check": do_check, "close": do_close}
+def do_report():
+    from paper_trading import evaluate
+    ledger = common.load_ledger(LEDGER_PATH)
+    print(evaluate.format_scorecard(
+        evaluate.summarize_trades(ledger.get("closed", [])),
+        title="Live ER paper ledger (closed trades)",
+    ))
+
+
+def do_score():
+    print("[paper-er] ER has no separate scan grader; `report` is the scorecard.")
+    do_report()
+
+
+ACTIONS = {"open": do_open, "check": do_check, "close": do_close,
+           "report": do_report, "score": do_score}
 
 if __name__ == "__main__":
     action = sys.argv[1] if len(sys.argv) > 1 else ""
     if action not in ACTIONS:
-        print("usage: python3 -m paper_trading.trade_er open|check|close")
+        print("usage: python3 -m paper_trading.trade_er open|check|close|report|score")
         sys.exit(1)
     ACTIONS[action]()

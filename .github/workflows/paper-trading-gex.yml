@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: "31 13 * * 1-5"        # 9:31 AM ET - OPEN (just after market open)
     - cron: "0,30 14-19 * * 1-5"   # every 30 min, ~10:00 AM - 3:30 PM ET - CHECK stop/target
-    - cron: "55 19 * * 1-5"        # 3:55 PM ET - CLOSE (force EOD, before the 4pm close)
+    - cron: "55 19 * * 1-5"        # 3:55 PM ET - CLOSE expired holds (same-day names; oversold at 5 sessions)
   workflow_dispatch:
     inputs:
       action:
