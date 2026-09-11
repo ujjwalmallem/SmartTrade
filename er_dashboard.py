@@ -31,6 +31,12 @@ What changed vs. the original
 This ranks price/volume behaviour around earnings. It is not investment advice
 and says nothing about whether a business is worth owning.
 
+Paper trading (`paper_trading/trade_er.py`) only opens *actionable*
+continuation: earnings-anchored upside gap, last complete session is the
+gap day or the next one, EntryScore (no look-ahead follow-through) at the
+Watch cutoff, and not Fighting the sector. Those are held up to
+FOLLOW_SESSIONS. Historical replay: python3 -m paper_trading.backtest_er
+
 Native usage:
     pip install -r requirements.txt
     python3 er_dashboard.py
@@ -52,19 +58,24 @@ pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 300)
 
 
-def notify_ntfy(title: str, message: str) -> None:
+def notify_ntfy(title: str, message: str, tags: str = "") -> None:
     """Push a summary to the user's phone via ntfy.sh. No-op if NTFY_TOPIC is unset."""
     topic = os.environ.get("NTFY_TOPIC")
     if not topic:
         print("[notify] NTFY_TOPIC not set; skipping push notification.")
         return
+    headers = {"Title": title, "Priority": "default"}
+    if tags:
+        headers["Tags"] = tags
     try:
-        requests.post(
+        resp = requests.post(
             f"https://ntfy.sh/{topic}",
             data=message.encode("utf-8"),
-            headers={"Title": title, "Priority": "default"},
+            headers=headers,
             timeout=10,
         )
+        resp.raise_for_status()
+        print(f"[notify] posted {title!r} ({resp.status_code})")
     except requests.RequestException as exc:
         print(f"[notify] Failed to send ntfy push: {exc}")
 
@@ -97,6 +108,15 @@ ER_WINDOW_BEFORE = 1       # sessions before the ER date to consider (BMO prints
 ER_WINDOW_AFTER = 3        # sessions after (AMC prints react the next day)
 RVOL_LOOKBACK = 20         # baseline length, ending the day *before* the gap day
 FOLLOW_SESSIONS = 3        # follow-through window after the gap day
+# Paper / notify gate: gap is the last complete session (age 0) or the
+# next one (age 1). Age 1 covers a 9:31 paper open if Yahoo already
+# appended today's incomplete bar and last_complete_daily_frame failed.
+MAX_ACTIONABLE_AGE = 1
+ENTRY_SCORE_THRESHOLD = 3.5   # Watch cutoff, but using EntryScore (no Fol3)
+MIN_RVOL_FOR_PAPER = 1.8
+HOLD_HORIZON_DAYS = FOLLOW_SESSIONS
+PAPER_SIGNAL = "ER_CONTINUATION"
+MARKET_CLOSE_ET = (16, 0)
 
 CORE_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA",
@@ -169,6 +189,44 @@ def close_panel(raw, tickers):
     px = pd.DataFrame(out)
     px.index = _naive_index(px.index)
     return px
+
+
+def last_complete_daily_frame(df, now=None):
+    """Drop an in-progress RTH bar so gap / RVOL / follow are not baked from
+    a few minutes of today's prints. Same 4pm ET cutoff as gex_scanner."""
+    if df is None or df.empty:
+        return df
+    now_et = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="America/New_York")
+    if now_et.tzinfo is None:
+        now_et = now_et.tz_localize("America/New_York")
+    else:
+        now_et = now_et.tz_convert("America/New_York")
+    last = pd.Timestamp(df.index[-1])
+    if last.tzinfo is not None:
+        last_day = last.tz_convert("America/New_York").tz_localize(None).normalize()
+    else:
+        last_day = last.tz_localize(None).normalize()
+    today = now_et.tz_localize(None).normalize()
+    before_close = (now_et.hour, now_et.minute) < MARKET_CLOSE_ET
+    if last_day == today and before_close and len(df) >= 2:
+        return df.iloc[:-1]
+    return df
+
+
+def gap_age_sessions(df, gap_date):
+    """How many complete sessions sit after the gap day (0 = gap is last bar)."""
+    if df is None or df.empty or gap_date is None:
+        return np.nan
+    idx = pd.Timestamp(gap_date)
+    if idx.tzinfo is not None:
+        idx = idx.tz_convert(None)
+    idx = idx.normalize()
+    if idx not in df.index:
+        return np.nan
+    pos = df.index.get_loc(idx)
+    if not isinstance(pos, (int, np.integer)):
+        return np.nan
+    return int(len(df) - 1 - pos)
 
 
 # ====================== STOOQ FALLBACK (keyless, independent of Yahoo) ======================
@@ -318,6 +376,83 @@ def get_basic_info(ticker):
 
 
 # ====================== REACTION ======================
+def signed_gaps(df):
+    gaps = (df["Open"] / df["Close"].shift(1) - 1) * 100
+    return gaps.dropna()
+
+
+def rvol_at(df, pos):
+    """Gap-day volume vs the RVOL_LOOKBACK sessions *before* it."""
+    start = max(0, pos - RVOL_LOOKBACK)
+    base = df["Volume"].iloc[start:pos]
+    if len(base) < 5:
+        return np.nan
+    m = float(base.mean())
+    if m <= 0:
+        return np.nan
+    return float(df["Volume"].iloc[pos]) / m
+
+
+def follow_at(df, pos, sessions=FOLLOW_SESSIONS):
+    """Close-to-close move over `sessions` after the gap. Partial window if
+    the series ends early; NaN if the gap is the last bar."""
+    if pos >= len(df) - 1:
+        return np.nan
+    end = min(pos + sessions, len(df) - 1)
+    return float(df["Close"].iloc[end] / df["Close"].iloc[pos] - 1) * 100
+
+
+def pick_gap_in_window(gaps, last_er=None):
+    """Return (gap_date, gap, source). source is ER if last_er landed in range."""
+    if gaps is None or gaps.empty:
+        return None, np.nan, "NO-DATA"
+    source = "NO-ER"
+    window = gaps
+    if last_er is not None:
+        lo = last_er - pd.Timedelta(days=ER_WINDOW_BEFORE + 2)   # +2 for weekends
+        hi = last_er + pd.Timedelta(days=ER_WINDOW_AFTER + 2)
+        w = gaps[(gaps.index >= lo) & (gaps.index <= hi)]
+        if not w.empty:
+            window = w
+            source = "ER"
+    gap_date = window.abs().idxmax()
+    return gap_date, float(window.loc[gap_date]), source
+
+
+def iter_er_events(df, earnings_dates):
+    """Yield one event per distinct earnings-window gap in `df`.
+
+    Used by the historical paper backtest so it shares the live window
+    (ER_WINDOW_BEFORE/AFTER) and RVOL definition. Does not compute
+    follow-through — that would leak the thing we are trying to predict.
+    """
+    if df is None or len(df) < RVOL_LOOKBACK + 2:
+        return
+    gaps = signed_gaps(df)
+    if gaps.empty:
+        return
+    seen = set()
+    for er in earnings_dates:
+        er_ts = pd.Timestamp(er)
+        if er_ts.tzinfo is not None:
+            er_ts = er_ts.tz_convert(None)
+        er_ts = er_ts.normalize()
+        gap_date, gap, source = pick_gap_in_window(gaps, er_ts)
+        if source != "ER" or gap_date is None or gap_date in seen:
+            continue
+        seen.add(gap_date)
+        pos = df.index.get_loc(gap_date)
+        if not isinstance(pos, (int, np.integer)):
+            continue
+        yield {
+            "er_date": er_ts,
+            "gap_date": gap_date,
+            "gap": float(gap),
+            "rvol": rvol_at(df, pos),
+            "pos": int(pos),
+        }
+
+
 def compute_reaction(df, last_er=None):
     """
     Measure the earnings reaction from a single ticker's OHLCV frame.
@@ -330,58 +465,32 @@ def compute_reaction(df, last_er=None):
     blank = {
         "gap": np.nan, "rvol": np.nan, "follow": np.nan,
         "gap_date": None, "source": "NO-DATA", "last_close": np.nan,
+        "gap_age": np.nan,
     }
     if df is None or len(df) < RVOL_LOOKBACK + 2:
         if df is not None and len(df):
             blank["last_close"] = float(df["Close"].iloc[-1])
         return blank
 
-    gaps = (df["Open"] / df["Close"].shift(1) - 1) * 100
-    gaps = gaps.dropna()
+    gaps = signed_gaps(df)
     if gaps.empty:
         blank["last_close"] = float(df["Close"].iloc[-1])
         return blank
 
-    source = "NO-ER"
-    window = gaps
-    if last_er is not None:
-        lo = last_er - pd.Timedelta(days=ER_WINDOW_BEFORE + 2)   # +2 for weekends
-        hi = last_er + pd.Timedelta(days=ER_WINDOW_AFTER + 2)
-        w = gaps[(gaps.index >= lo) & (gaps.index <= hi)]
-        if not w.empty:
-            window = w
-            source = "ER"
-
-    gap_date = window.abs().idxmax()
-    gap = float(window.loc[gap_date])
-
+    gap_date, gap, source = pick_gap_in_window(gaps, last_er)
     pos = df.index.get_loc(gap_date)
-
-    # RVOL: gap-day volume vs the RVOL_LOOKBACK sessions *before* it
-    start = max(0, pos - RVOL_LOOKBACK)
-    base = df["Volume"].iloc[start:pos]
-    rvol = np.nan
-    if len(base) >= 5:
-        m = float(base.mean())
-        if m > 0:
-            rvol = float(df["Volume"].iloc[pos]) / m
-
-    # Follow-through: gap-day close -> close FOLLOW_SESSIONS later
-    follow = np.nan
-    end = pos + FOLLOW_SESSIONS
-    if end < len(df):
-        follow = float(df["Close"].iloc[end] / df["Close"].iloc[pos] - 1) * 100
-    elif pos < len(df) - 1:
-        # partial window: use what exists, still informative
-        follow = float(df["Close"].iloc[-1] / df["Close"].iloc[pos] - 1) * 100
+    if not isinstance(pos, (int, np.integer)):
+        blank["last_close"] = float(df["Close"].iloc[-1])
+        return blank
 
     return {
         "gap": gap,
-        "rvol": rvol,
-        "follow": follow,
+        "rvol": rvol_at(df, pos),
+        "follow": follow_at(df, pos),
         "gap_date": gap_date,
         "source": source,
         "last_close": float(df["Close"].iloc[-1]),
+        "gap_age": int(len(df) - 1 - pos),
     }
 
 
@@ -476,6 +585,69 @@ def reaction_target(price, gap, rvol):
     return round(price * (1 + ext / 100), 2)
 
 
+def reaction_stop(price, gap):
+    """Long stop: retrace half the overnight gap, clamped 2–6%.
+
+    ER has no wall-anchored stop the way GEX does. A flat 3% clipped
+    high-RVOL names too tightly and let small gaps run too far; half the
+    print, bounded, tracks the reaction itself. Down gaps have no long stop.
+    """
+    if pd.isna(price) or price <= 0 or pd.isna(gap) or gap <= 0:
+        return np.nan
+    retrace = min(max(gap * 0.50, 2.0), 6.0)
+    return round(price * (1 - retrace / 100), 2)
+
+
+def entry_score(gap, rvol, eps_surprise, rs_20d, sector_vs_bench,
+                short_percent=np.nan, after_hours_focus=AFTER_HOURS_FOCUS):
+    """Watch/STRONG gate with follow-through *excluded*.
+
+    Fol3% is the thing a continuation trade is trying to capture. Baking it
+    into Final is fine for ranking last quarter's print; using it to open a
+    paper position is look-ahead.
+    """
+    r = score_reaction(gap, rvol, follow=np.nan,
+                       after_hours_focus=after_hours_focus)
+    f = score_fundamental(eps_surprise)
+    s = score_sector(rs_20d, sector_vs_bench)
+    si = 1.0 if (pd.notna(short_percent) and short_percent >= 0.08) else 0.0
+    return round(r + f + si + s, 1)
+
+
+def is_paper_candidate(row) -> bool:
+    """True when a dashboard row is a fresh upside continuation to paper-trade."""
+    src = row.get("Src") if hasattr(row, "get") else row["Src"]
+    if src != "ER":
+        return False
+    conv = row.get("Conv") if hasattr(row, "get") else row["Conv"]
+    if conv == "Fighting":
+        return False
+    gap = row.get("Gap%") if hasattr(row, "get") else row["Gap%"]
+    if pd.isna(gap) or gap <= 0:
+        return False
+    tgt = row.get("React Tgt") if hasattr(row, "get") else row["React Tgt"]
+    if pd.isna(tgt):
+        return False
+    age = row.get("GapAge") if hasattr(row, "get") else row["GapAge"]
+    if pd.isna(age) or int(age) > MAX_ACTIONABLE_AGE:
+        return False
+    rvol = row.get("RVOL") if hasattr(row, "get") else row["RVOL"]
+    if pd.isna(rvol) or rvol < MIN_RVOL_FOR_PAPER:
+        return False
+    score = row.get("EntryScore") if hasattr(row, "get") else row["EntryScore"]
+    if pd.isna(score) or score < ENTRY_SCORE_THRESHOLD:
+        return False
+    return True
+
+
+def paper_candidates(df):
+    """Actionable rows, highest EntryScore first, cap applied by the caller."""
+    if df is None or getattr(df, "empty", True):
+        return df if df is not None else pd.DataFrame()
+    mask = df.apply(is_paper_candidate, axis=1)
+    return df.loc[mask].sort_values("EntryScore", ascending=False)
+
+
 def convergence_label(r_score, s_score):
     if r_score >= 2.0 and s_score >= 1.0:
         return "Aligned+"
@@ -507,6 +679,7 @@ def build_dashboard(tickers=CORE_TICKERS, after_hours_focus=AFTER_HOURS_FOCUS,
 
     px = close_panel(raw, universe)
     px = fill_missing_close_columns(px, set(etfs) | {BENCHMARK})
+    px = last_complete_daily_frame(px)
     print(f"Got {len(px)} sessions, {px.shape[1]} symbols.\n")
 
     rows = []
@@ -521,6 +694,7 @@ def build_dashboard(tickers=CORE_TICKERS, after_hours_focus=AFTER_HOURS_FOCUS,
                 print("NO PRICE DATA (Yahoo + Stooq both failed)")
                 continue
             flags.append("price-src:stooq")
+        df = last_complete_daily_frame(df)
 
         info = get_basic_info(ticker)
         if not info["ok"]:
@@ -537,8 +711,11 @@ def build_dashboard(tickers=CORE_TICKERS, after_hours_focus=AFTER_HOURS_FOCUS,
             flags.append("NO-ER")
         if pd.isna(reaction["rvol"]):
             flags.append("no-rvol")
+        gap_age = reaction.get("gap_age", np.nan)
         if pd.isna(reaction["follow"]):
             flags.append("fresh")   # gap is the latest bar; no follow-through yet
+        elif pd.notna(gap_age) and 0 < gap_age < FOLLOW_SESSIONS:
+            flags.append("partial-follow")
 
         sector = info["sector"]
         etf = SECTOR_ETF.get(sector, DEFAULT_ETF)
@@ -557,8 +734,14 @@ def build_dashboard(tickers=CORE_TICKERS, after_hours_focus=AFTER_HOURS_FOCUS,
         si_boost = 1.0 if (pd.notna(info["short_percent"])
                            and info["short_percent"] >= 0.08) else 0.0
         final = round(r_score + f_score + si_boost + s_score, 1)
+        e_score = entry_score(
+            reaction["gap"], reaction["rvol"], eps_surp,
+            rs["rs_20d"], rs["sector_vs_bench"],
+            info["short_percent"], after_hours_focus,
+        )
 
         r_tgt = reaction_target(price, reaction["gap"], reaction["rvol"])
+        stop = reaction_stop(price, reaction["gap"])
         upside = round((r_tgt / price - 1) * 100, 1) if (pd.notna(r_tgt)
                                                          and price > 0) else np.nan
 
@@ -585,6 +768,9 @@ def build_dashboard(tickers=CORE_TICKERS, after_hours_focus=AFTER_HOURS_FOCUS,
                             if pd.notna(rs["sector_vs_bench"]) else np.nan),
             "Sect Score": s_score,
             "Final": final,
+            "EntryScore": e_score,
+            "GapAge": gap_age if pd.notna(gap_age) else np.nan,
+            "Stop": stop,
             "React Tgt": r_tgt,
             "Upside%": upside,
             "Analyst Tgt": round(a_tgt, 2) if pd.notna(a_tgt) else np.nan,
@@ -594,7 +780,8 @@ def build_dashboard(tickers=CORE_TICKERS, after_hours_focus=AFTER_HOURS_FOCUS,
                        if pd.notna(info["short_percent"]) else np.nan),
             "Flags": ",".join(flags),
         })
-        print(f"OK | {reaction['source']} | React {r_score} | Sect {s_score}")
+        rows[-1]["Actionable"] = is_paper_candidate(rows[-1])
+        print(f"OK | {reaction['source']} | React {r_score} | Entry {e_score} | Sect {s_score}")
 
     if not rows:
         print("\nNo rows collected.")
@@ -615,7 +802,20 @@ def report(df):
     er_only = df[df["Src"] == "ER"]
     print(f"\nRows anchored to an actual earnings date: {len(er_only)}/{len(df)}")
 
-    print("\n=== TOP IDEAS (earnings-anchored only) ===")
+    print("\n=== ACTIONABLE (fresh upside, paper-eligible) ===")
+    fresh = paper_candidates(df)
+    if fresh.empty:
+        print("None. Paper trading will not open today.")
+    else:
+        for _, r in fresh.iterrows():
+            tgt = (f"${r['React Tgt']:7.2f} ({r['Upside%']:+5.1f}%)"
+                   if pd.notna(r["React Tgt"]) else "     n/a")
+            stop = f"${r['Stop']:.2f}" if pd.notna(r["Stop"]) else "n/a"
+            print(f"{r['Ticker']:6} | ${r['Price']:8.2f} -> {tgt} | stop {stop} "
+                  f"| Entry {r['EntryScore']:5.1f} | Gap {r['Gap%']:+6.1f}% "
+                  f"| RVOL {r['RVOL']:.1f} | age {int(r['GapAge'])}d")
+
+    print("\n=== TOP IDEAS (earnings-anchored, includes stale prints) ===")
     top = er_only.head(12)
     if top.empty:
         print("No earnings-anchored rows in range.")
@@ -627,12 +827,16 @@ def report(df):
                 flag = "Watch"
             else:
                 flag = ""
+            if r.get("Actionable"):
+                flag = (flag + " ACTIONABLE").strip()
             tgt = f"${r['React Tgt']:7.2f} ({r['Upside%']:+5.1f}%)" if pd.notna(r["React Tgt"]) else "     n/a (down gap)"
             rvol = f"{r['RVOL']:.1f}" if pd.notna(r["RVOL"]) else " n/a"
             conv = f" [{r['Conv']}]" if r["Conv"] else ""
             note = f" ({r['Flags']})" if r["Flags"] else ""
+            entry = f"{r['EntryScore']:5.1f}" if pd.notna(r.get("EntryScore")) else "  n/a"
             print(f"{r['Ticker']:6} | ${r['Price']:8.2f} -> {tgt} | Final {r['Final']:5.1f} "
-                  f"| Gap {r['Gap%']:+6.1f}% | RVOL {rvol} | Sect {r['Sect Score']:+.1f}{conv} {flag}{note}")
+                  f"| Entry {entry} | Gap {r['Gap%']:+6.1f}% | RVOL {rvol} "
+                  f"| Sect {r['Sect Score']:+.1f}{conv} {flag}{note}")
 
     print("\n=== DOWNSIDE REACTIONS (gap < -5%) ===")
     down = df[df["Gap%"] < -5].sort_values("Gap%")
@@ -648,10 +852,13 @@ def report(df):
     print("Gap%        = Open / prior Close - 1, SIGNED")
     print("RVOL        = gap-day volume vs the 20 sessions before it")
     print("Fol3%       = close-to-close move over the 3 sessions after the gap")
+    print("EntryScore  = Watch/STRONG gate *without* Fol3 (no look-ahead)")
+    print("GapAge      = complete sessions after the gap day (0 = fresh)")
+    print("Actionable  = ER upside, GapAge<=1, EntryScore>=3.5, RVOL>=1.8, not Fighting")
     print("Aligned+    = strong reaction inside a leading sector")
     print("Supportive  = decent reaction with a sector tailwind")
     print("Fighting    = strong reaction, lagging sector (higher fade risk)")
-    print("Flags fresh = gap is the newest bar, no follow-through yet")
+    print("Flags fresh = gap is the newest complete bar, no follow-through yet")
     print("\nNote: AFTER_HOURS_FOCUS only shifts RVOL thresholds. Nothing here")
     print("reads extended-hours prints; that needs history(prepost=True).")
     print("\nThis screens price/volume behaviour, not investment merit.")
@@ -663,20 +870,24 @@ def notify_summary(df):
         return
 
     er_only = df[df["Src"] == "ER"]
-    strong = er_only[(er_only["Final"] >= 6) & (er_only["RVOL"] >= 2)]
-    watch = er_only[(er_only["Final"] >= 3.5) & (er_only["Final"] < 6)]
-
-    top = pd.concat([strong, watch]).head(5)
-    if top.empty:
-        notify_ntfy("ER Dashboard: nothing notable",
-                     f"{len(er_only)} earnings-anchored rows, none scored Watch/STRONG.")
+    fresh = paper_candidates(df)
+    if not fresh.empty:
+        lines = []
+        for _, r in fresh.head(5).iterrows():
+            lines.append(
+                f"{r['Ticker']} Entry={r['EntryScore']} Gap={r['Gap%']:+.1f}% "
+                f"RVOL={r['RVOL']:.1f} age={int(r['GapAge'])}d"
+            )
+        notify_ntfy(f"ER Dashboard: {len(fresh)} fresh continuation(s)",
+                    "\n".join(lines), tags="chart_with_upwards_trend")
         return
 
-    lines = []
-    for _, r in top.iterrows():
-        tag = "STRONG" if r["Ticker"] in strong["Ticker"].values else "Watch"
-        lines.append(f"{tag} {r['Ticker']} Final={r['Final']} Gap={r['Gap%']:+.1f}% RVOL={r['RVOL']:.1f}")
-    notify_ntfy(f"ER Dashboard: {len(top)} idea(s)", "\n".join(lines))
+    stale = er_only[(er_only["Final"] >= ENTRY_SCORE_THRESHOLD) & (er_only["Gap%"] > 0)]
+    notify_ntfy(
+        "ER Dashboard: no fresh continuation",
+        f"{len(er_only)} earnings-anchored rows, {len(stale)} stale Watch/STRONG "
+        f"(follow-through already in Final — not paper-traded).",
+    )
 
 
 if __name__ == "__main__":

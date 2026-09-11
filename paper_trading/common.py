@@ -4,7 +4,7 @@ Shared ledger mechanics for the GEX and ER paper-trading drivers.
 Positions are equity-only (long or short the underlying stock at spot
 price), fixed-dollar sized. Hold length is per-signal: same-day names are
 opened near market open and force-closed at the session's last check if
-neither stop nor target hits; swing names (currently OVERSOLD_BULL_PULLBACK)
+neither stop nor target hits; swing names (GEX OVERSOLD, ER continuation)
 stay open across sessions up to `hold_days` and only exit on stop, target,
 or the hold expiring. This does NOT simulate the options strategies the
 scanners actually recommend (spread pricing, IV, fills) -- it paper-trades
@@ -13,9 +13,8 @@ the stock as a directional proxy for the signal.
 The ledger is a JSON file: {"open": [...], "closed": [...], "scans": [...]}.
 Each driver script (trade_gex.py / trade_er.py) owns its own ledger file;
 the calling shell wrapper is responsible for committing it back to git
-after a run that changes it. GEX `open` also stores that morning's full
-scan under `scans` so wall/pin setups can be graded later even though
-they are not paper-traded.
+after a run that changes it. Each `open` also stores that morning's full
+scan under `scans` so skipped setups can be graded later.
 """
 
 import json

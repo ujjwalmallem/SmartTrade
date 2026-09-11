@@ -6,9 +6,12 @@ import numpy as np
 import pandas as pd
 
 import gex_scanner as gex
+import er_dashboard as er
 from paper_trading import common, evaluate
 from paper_trading.backtest_gex import backtest_symbol, in_earnings_blackout
+from paper_trading.backtest_er import backtest_symbol as backtest_er_symbol
 from paper_trading.trade_gex import format_open_push
+from paper_trading.trade_er import format_open_push as format_er_open_push
 
 
 class OpenPushTests(unittest.TestCase):
@@ -282,6 +285,123 @@ class BacktestWalkTests(unittest.TestCase):
         self.assertTrue(in_earnings_blackout(pd.Timestamp("2026-09-08"), earnings))
         self.assertFalse(in_earnings_blackout(pd.Timestamp("2026-09-07"), earnings))
         self.assertFalse(in_earnings_blackout(pd.Timestamp("2026-09-16"), earnings))
+
+
+class ErDashboardGateTests(unittest.TestCase):
+    def _row(self, **overrides):
+        row = {
+            "Src": "ER",
+            "Conv": "",
+            "Gap%": 8.0,
+            "React Tgt": 110.0,
+            "GapAge": 0,
+            "RVOL": 2.5,
+            "EntryScore": 4.0,
+            "Ticker": "AAA",
+            "Price": 100.0,
+            "Stop": 96.0,
+            "Flags": "fresh",
+        }
+        row.update(overrides)
+        return row
+
+    def test_fresh_upside_is_actionable(self):
+        self.assertTrue(er.is_paper_candidate(self._row()))
+
+    def test_stale_gap_is_not_actionable(self):
+        self.assertFalse(er.is_paper_candidate(self._row(GapAge=5)))
+
+    def test_down_gap_is_not_actionable(self):
+        self.assertFalse(er.is_paper_candidate(self._row(**{"Gap%": -8.0, "React Tgt": np.nan})))
+
+    def test_fighting_is_not_actionable(self):
+        self.assertFalse(er.is_paper_candidate(self._row(Conv="Fighting")))
+
+    def test_low_entry_score_is_not_actionable(self):
+        self.assertFalse(er.is_paper_candidate(self._row(EntryScore=2.0)))
+
+    def test_entry_score_ignores_follow(self):
+        with_follow = er.score_reaction(8.0, 3.0, follow=10.0, after_hours_focus=True)
+        without = er.score_reaction(8.0, 3.0, follow=np.nan, after_hours_focus=True)
+        self.assertGreater(with_follow, without)
+        live = er.entry_score(8.0, 3.0, eps_surprise=np.nan, rs_20d=np.nan,
+                              sector_vs_bench=np.nan)
+        self.assertEqual(live, without)
+
+    def test_stop_is_half_gap_clamped(self):
+        self.assertAlmostEqual(er.reaction_stop(100.0, 8.0), 96.0, places=2)
+        self.assertAlmostEqual(er.reaction_stop(100.0, 2.0), 98.0, places=2)  # floor 2%
+        self.assertAlmostEqual(er.reaction_stop(100.0, 20.0), 94.0, places=2)  # cap 6%
+        self.assertTrue(np.isnan(er.reaction_stop(100.0, -8.0)))
+
+    def test_last_complete_bar_drops_rth_today(self):
+        idx = pd.to_datetime(["2026-09-10", "2026-09-11"])
+        df = pd.DataFrame({"Close": [10.0, 11.0]}, index=idx)
+        now = pd.Timestamp("2026-09-11 09:31", tz="America/New_York")
+        trimmed = er.last_complete_daily_frame(df, now=now)
+        self.assertEqual(float(trimmed["Close"].iloc[-1]), 10.0)
+        after = er.last_complete_daily_frame(
+            df, now=pd.Timestamp("2026-09-11 16:05", tz="America/New_York"))
+        self.assertEqual(float(after["Close"].iloc[-1]), 11.0)
+
+
+class ErOpenPushTests(unittest.TestCase):
+    def test_no_candidates_still_has_a_title(self):
+        title, body = format_er_open_push([], pd.DataFrame())
+        self.assertEqual(title, "Paper ER: no fresh continuation")
+        self.assertIn("No actionable", body)
+
+    def test_opened_lists_hold(self):
+        opened = [{"symbol": "NVDA", "entry_price": 100, "stop_loss": 96,
+                   "target_price": 108, "hold_days": 3}]
+        title, body = format_er_open_push(opened, pd.DataFrame())
+        self.assertEqual(title, "Paper ER: opened 1")
+        self.assertIn("hold 3d", body)
+
+
+def _er_gap_frame(n_before=40, gap_pct=0.08, follow_up=True) -> pd.DataFrame:
+    """Quiet tape, then an 8% earnings gap with 4x volume, then follow-through."""
+    n = n_before + 5
+    idx = pd.bdate_range("2024-01-02", periods=n)
+    close = np.full(n, 100.0)
+    open_ = np.full(n, 100.0)
+    high = np.full(n, 101.0)
+    low = np.full(n, 99.0)
+    vol = np.full(n, 1_000_000.0)
+    g = n_before
+    open_[g] = 100.0 * (1 + gap_pct)
+    close[g] = open_[g]
+    high[g] = close[g] * 1.01
+    low[g] = close[g] * 0.99
+    vol[g] = 4_000_000.0
+    px = close[g]
+    for i in range(g + 1, n):
+        px = px * (1.02 if follow_up else 0.99)
+        open_[i] = close[i - 1] * 1.001
+        close[i] = px
+        high[i] = max(open_[i], close[i]) * 1.01
+        low[i] = min(open_[i], close[i]) * 0.99
+    return pd.DataFrame(
+        {"Open": open_, "High": high, "Low": low, "Close": close, "Volume": vol},
+        index=idx,
+    )
+
+
+class ErBacktestWalkTests(unittest.TestCase):
+    def test_synthetic_gap_emits_a_long(self):
+        df = _er_gap_frame()
+        gap_day = df.index[40]
+        trades = backtest_er_symbol("FAKE", df, {pd.Timestamp(gap_day)})
+        self.assertTrue(trades, "expected an ER continuation long after the gap")
+        self.assertTrue(all(t["signal"] == er.PAPER_SIGNAL for t in trades))
+        self.assertTrue(all(t["direction"] == "LONG" for t in trades))
+        self.assertEqual(trades[0]["hold_days"], er.HOLD_HORIZON_DAYS)
+
+    def test_down_gap_is_not_traded(self):
+        df = _er_gap_frame(gap_pct=-0.10)
+        gap_day = df.index[40]
+        trades = backtest_er_symbol("FAKE", df, {pd.Timestamp(gap_day)})
+        self.assertEqual(trades, [])
 
 
 if __name__ == "__main__":
