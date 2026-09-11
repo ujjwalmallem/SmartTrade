@@ -40,6 +40,12 @@ DIRECTION_MAP = {
     "VOLATILITY_EXPANSION_BEAR": "SHORT",
 }
 MAX_NEW_POSITIONS = 5
+# Same-day paper P&L on OVERSOLD was a coin flip; 1d/5d hold-to-close was
+# positive. Bear 5d was negative, so it stays a same-day trade.
+HOLD_DAYS = {
+    "OVERSOLD_BULL_PULLBACK": gex.HOLD_HORIZON_DAYS["OVERSOLD_BULL_PULLBACK"],
+    "VOLATILITY_EXPANSION_BEAR": gex.HOLD_HORIZON_DAYS["VOLATILITY_EXPANSION_BEAR"],
+}
 
 
 def do_open():
@@ -51,9 +57,13 @@ def do_open():
     if not df_setups.empty:
         candidates = df_setups[df_setups["signal"].isin(DIRECTION_MAP)].head(MAX_NEW_POSITIONS)
         for _, row in candidates.iterrows():
+            if row.get("has_earnings_data") is False:
+                print(f"[paper-gex] skip {row['symbol']}: earnings calendar unconfirmed")
+                continue
             pos = common.open_position(
                 ledger, row["symbol"], DIRECTION_MAP[row["signal"]], row["price"],
                 row["stop_loss"], row["target_price"], row["signal"],
+                hold_days=HOLD_DAYS.get(row["signal"], 1),
             )
             if pos:
                 opened.append(pos)
@@ -63,7 +73,7 @@ def do_open():
     if opened:
         lines = [
             f"{p['direction']} {p['symbol']} @ ${p['entry_price']} "
-            f"(stop {p['stop_loss']}, tgt {p['target_price']})"
+            f"(stop {p['stop_loss']}, tgt {p['target_price']}, hold {p.get('hold_days', 1)}d)"
             for p in opened
         ]
         gex.notify_ntfy(f"Paper GEX: opened {len(opened)}", "\n".join(lines))
@@ -97,28 +107,43 @@ def do_check():
 
 
 def do_close():
+    """Session-end: force-close names whose hold has expired (same-day
+    signals expire today; OVERSOLD stays open up to hold_days sessions).
+    Stop/target hits are handled by `check` during the day.
+    """
     ledger = common.load_ledger(LEDGER_PATH)
+    closed = []
     for pos in list(ledger["open"]):
+        if not common.hold_expired(pos):
+            continue
         price = gex.cache.get_spot_price(pos["symbol"])
         if pd.isna(price) or price <= 0:
-            price = pos["entry_price"]   # last resort so it isn't stuck open forever
-        common.close_position(ledger, pos, price, "EOD")
+            price = pos["entry_price"]
+        hold_days = int(pos.get("hold_days") or 1)
+        reason = "EOD" if hold_days <= 1 else "TIME"
+        common.close_position(ledger, pos, price, reason)
+        closed.append(pos)
 
     common.save_ledger(LEDGER_PATH, ledger)
 
-    todays = common.todays_closed(ledger)
-    if todays:
-        total_pnl = round(sum(p["pnl_usd"] for p in todays), 2)
-        wins = sum(1 for p in todays if p["pnl_usd"] > 0)
+    if closed:
+        total_pnl = round(sum(p["pnl_usd"] for p in closed), 2)
+        wins = sum(1 for p in closed if p["pnl_usd"] > 0)
         lines = [
             f"{p['symbol']} {p['exit_reason']} P&L ${p['pnl_usd']} ({p['pnl_pct']:+.1f}%)"
-            for p in todays
+            for p in closed
         ]
-        summary = f"Total P&L: ${total_pnl} | {wins}/{len(todays)} winners\n" + "\n".join(lines)
-        gex.notify_ntfy(f"Paper GEX EOD: ${total_pnl}", summary)
-        print(f"[paper-gex] EOD close: {len(todays)} trade(s), total P&L ${total_pnl}")
+        still_open = len(ledger["open"])
+        summary = (f"Closed {len(closed)} | Total P&L: ${total_pnl} | "
+                   f"{wins}/{len(closed)} winners | still open {still_open}\n"
+                   + "\n".join(lines))
+        gex.notify_ntfy(f"Paper GEX session: ${total_pnl}", summary)
+        print(f"[paper-gex] session close: {len(closed)} trade(s), "
+              f"total P&L ${total_pnl}, still open {still_open}")
     else:
-        print("[paper-gex] EOD close: no trades today")
+        still_open = len(ledger["open"])
+        print(f"[paper-gex] session close: nothing expired"
+              + (f" ({still_open} swing(s) still open)" if still_open else ""))
 
 
 def do_report():

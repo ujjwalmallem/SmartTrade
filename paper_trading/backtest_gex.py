@@ -140,18 +140,25 @@ def backtest_symbol(
     ohlcv: pd.DataFrame,
     earnings: Optional[Set[pd.Timestamp]] = None,
     include_bear_proxy: bool = True,
+    hold_days_by_signal: Optional[Dict[str, int]] = None,
+    require_rsi_rising: bool = False,
+    non_overlapping: bool = True,
 ) -> List[Dict]:
-    """Walk one symbol. Signal on close[t], fill open[t+1], exit on bar t+1."""
+    """Walk one symbol. Signal on close[t], fill open[t+1], hold up to N bars."""
     df = gex.compute_indicators(ohlcv)
     if "RSI" not in df.columns or "EMA_200" not in df.columns:
         return []
 
+    hold_days_by_signal = hold_days_by_signal or dict(gex.HOLD_HORIZON_DAYS)
     trades: List[Dict] = []
     n = len(df)
     earnings = earnings or set()
     start_i = max(INDICATOR_WARMUP, MIN_BARS) - 1
+    busy_until = -1  # last bar index still in a paper position
 
     for i in range(start_i, n - 1):
+        if non_overlapping and (i + 1) <= busy_until:
+            continue
         row = df.iloc[i]
         nxt = df.iloc[i + 1]
         rsi = row.get("RSI", np.nan)
@@ -159,6 +166,10 @@ def backtest_symbol(
         close = float(row["Close"])
         if not np.isfinite(rsi) or not np.isfinite(ema) or close <= 0:
             continue
+        if require_rsi_rising:
+            prev_rsi = df.iloc[i - 1].get("RSI", np.nan) if i > 0 else np.nan
+            if not np.isfinite(prev_rsi) or not (rsi > prev_rsi):
+                continue
 
         signal_day = pd.Timestamp(df.index[i]).tz_localize(None).normalize()
         if in_earnings_blackout(signal_day, earnings):
@@ -195,9 +206,6 @@ def backtest_symbol(
         if not np.isfinite(entry) or entry <= 0:
             continue
 
-        # Re-check the gate at the fill (live uses 9:31 spot, not the prior
-        # close). A gap through the EMA means this morning's scan would not
-        # have printed the same directional setup.
         fill_regime = "NEGATIVE_GEX" if direction == "SHORT" else "NO_GEX"
         filled = gex.classify_setup(
             entry, float(rsi), float(ema),
@@ -208,13 +216,28 @@ def backtest_symbol(
         if not np.isfinite(filled["stop_loss"]) or not np.isfinite(filled["target_price"]):
             continue
 
+        max_days = int(hold_days_by_signal.get(signal, 1) or 1)
+        hold_bars = []
+        for k in range(1, max_days + 1):
+            if i + k >= n:
+                break
+            bar = df.iloc[i + k]
+            d = pd.Timestamp(df.index[i + k]).tz_localize(None).normalize()
+            hold_bars.append((
+                d.strftime("%Y-%m-%d"),
+                float(bar["Open"]), float(bar["High"]),
+                float(bar["Low"]), float(bar["Close"]),
+            ))
+        if not hold_bars:
+            continue
+
         trade_day = pd.Timestamp(df.index[i + 1]).tz_localize(None).normalize()
         extra = {
             "signal_date": signal_day.strftime("%Y-%m-%d"),
             "rsi": round(float(rsi), 1),
             "gex_filter": gex_filter,
+            "hold_days": max_days,
         }
-        # 1d / 5d forward from entry, hold-to-close (not the paper path)
         j1 = i + 2
         j5 = i + 6
         if j1 < n:
@@ -232,9 +255,12 @@ def backtest_symbol(
             symbol, direction, signal, trade_day.strftime("%Y-%m-%d"),
             entry, filled["stop_loss"], filled["target_price"],
             float(nxt["Open"]), float(nxt["High"]), float(nxt["Low"]), float(nxt["Close"]),
+            hold_bars=hold_bars, max_days=max_days,
             extra=extra,
         )
         trades.append(trade)
+        sessions = int(trade.get("sessions_held") or 1)
+        busy_until = i + sessions
     return trades
 
 
@@ -265,6 +291,8 @@ Caveats (read before treating these numbers as an edge):
   will over-fire vs production (live also needs NEGATIVE_GEX).
 - Stops/targets are the no-wall clamp fallbacks, not live wall-anchored
   levels, so paper P&L is not the options-spread P&L the scanner names.
+- OVERSOLD is held up to 5 sessions (stop/target/TIME); bear is same-day.
+  Consecutive signals on a name already in a trade are skipped.
 - Daily OHLC cannot sequence stop vs target; days where both sit in range
   are counted as STOP and flagged ambiguous.
 - Earnings blackout matches the live 0-7 day window when Yahoo returns
@@ -279,7 +307,7 @@ def format_backtest_report(summary: Dict, n_symbols: int) -> str:
         "=== GEX paper backtest (price-only reconstruction) ===",
         CAVEATS,
         "",
-        evaluate.format_scorecard(summary, title="Same-day $1,000 equity proxy"),
+        evaluate.format_scorecard(summary, title="$1,000 equity proxy (live hold rules)"),
         "",
         "Hold-to-close forward returns (direction-adjusted, not the paper path):",
     ]
@@ -297,23 +325,55 @@ def format_backtest_report(summary: Dict, n_symbols: int) -> str:
 def run_backtest(symbols: List[str], skip_earnings: bool = False) -> Dict:
     hist = load_history(symbols)
     all_trades: List[Dict] = []
+    earnings_map: Dict[str, Set[pd.Timestamp]] = {}
     for sym, df in hist.items():
         earnings: Set[pd.Timestamp] = set()
         if not skip_earnings:
             earnings = load_earnings_dates(sym)
             print(f"[backtest] {sym}: {len(earnings)} earnings date(s)")
+        earnings_map[sym] = earnings
         trades = backtest_symbol(sym, df, earnings=earnings, include_bear_proxy=True)
         print(f"[backtest] {sym}: {len(trades)} paper trade(s)")
         all_trades.extend(trades)
 
     summary = decorate_summary(evaluate.summarize_trades(all_trades), all_trades)
     report = format_backtest_report(summary, len(hist))
+
+    # Sensitivities on OVERSOLD only — printed, not mixed into the main sleeve.
+    oversold_1d = []
+    oversold_rising = []
+    for sym, df in hist.items():
+        oversold_1d.extend(backtest_symbol(
+            sym, df, earnings=earnings_map[sym], include_bear_proxy=False,
+            hold_days_by_signal={"OVERSOLD_BULL_PULLBACK": 1},
+            non_overlapping=False,
+        ))
+        oversold_rising.extend(backtest_symbol(
+            sym, df, earnings=earnings_map[sym], include_bear_proxy=False,
+            require_rsi_rising=True,
+        ))
+    sensitivities = {
+        "oversold_same_day": decorate_summary(
+            evaluate.summarize_trades(oversold_1d), oversold_1d),
+        "oversold_5d_rsi_rising": decorate_summary(
+            evaluate.summarize_trades(oversold_rising), oversold_rising),
+    }
+    report += "\n\n" + evaluate.format_scorecard(
+        sensitivities["oversold_same_day"],
+        title="Sensitivity: OVERSOLD same-day (old paper rule)",
+    )
+    report += "\n\n" + evaluate.format_scorecard(
+        sensitivities["oversold_5d_rsi_rising"],
+        title="Sensitivity: OVERSOLD 5d hold + RSI turning up",
+    )
+
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "symbols": sorted(hist.keys()),
         "skip_earnings": skip_earnings,
         "caveats": CAVEATS,
         "summary": summary,
+        "sensitivities": sensitivities,
         "trades": all_trades,
         "report": report,
     }

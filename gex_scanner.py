@@ -9,10 +9,19 @@ Native usage:
     python3 gex_scanner.py
 
 NOTE: Signal thresholds, tier base scores, and the GEX bonus weight are
-hand-set, not fitted. A same-day equity-proxy paper loop lives in
-paper_trading/, and python3 -m paper_trading.backtest_gex replays the
-price-only half of the directional signals against daily OHLC. Neither
-is a walk-forward-validated edge -- treat the ranking as a triage view.
+hand-set, not fitted. A paper loop lives in paper_trading/: oversold is
+held up to 5 sessions, other directional setups are same-day.
+python3 -m paper_trading.backtest_gex replays the price-only half of
+those rules against daily OHLC. Neither is a walk-forward-validated
+edge -- treat the ranking as a triage view.
+
+RSI/EMA use the last complete daily bar (yesterday until 4pm ET) so a
+9:31 scan does not bake a few minutes of today's prints into the 14-day
+RSI. Spot, walls, and GEX still use the live quote.
+
+If the earnings calendar is unreachable, the setup is still classified
+(with a score haircut and a CONFIRM EARNINGS prefix) rather than
+discarded. Paper trading will not open those names.
 
 To score live scans (including WALL_PIN / RESISTANCE, which are not
 paper-traded) after they accumulate: python3 -m paper_trading.trade_gex score
@@ -666,6 +675,31 @@ def clamp_above(level: float, spot: float, near: float = 0.02, far: float = 0.08
     return float(min(max(level, lo), hi))
 
 
+def last_complete_daily_row(hist: pd.DataFrame, now=None) -> pd.Series:
+    """Last finished daily bar. During RTH the latest Yahoo row is often
+    today's incomplete session (a few minutes of prints at 9:31), which
+    would leak a partial close into RSI/EMA. Use yesterday until 4pm ET;
+    after the close, today's bar is the complete one.
+    """
+    if hist is None or hist.empty:
+        raise ValueError("history is empty")
+    now_et = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="America/New_York")
+    if now_et.tzinfo is None:
+        now_et = now_et.tz_localize("America/New_York")
+    else:
+        now_et = now_et.tz_convert("America/New_York")
+    last = pd.Timestamp(hist.index[-1])
+    if last.tzinfo is not None:
+        last_day = last.tz_convert("America/New_York").tz_localize(None).normalize()
+    else:
+        last_day = last.tz_localize(None).normalize()
+    today = now_et.tz_localize(None).normalize()
+    before_close = (now_et.hour, now_et.minute) < (16, 0)
+    if last_day == today and before_close and len(hist) >= 2:
+        return hist.iloc[-2]
+    return hist.iloc[-1]
+
+
 # ==========================================
 # 6. SIGNAL & RANKING ENGINE
 # ==========================================
@@ -686,10 +720,25 @@ def _empty_row(symbol: str, signal: str, strategy: str, score: float,
         "gamma_flip": np.nan,
         "stop_loss": np.nan,
         "target_price": np.nan,
+        "hold_horizon": None,
         "recommended_strategy": strategy,
     }
     row.update(overrides)
     return row
+
+
+# Sessions the paper loop (and the backtest) will hold a directional proxy.
+# OVERSOLD is a swing: same-day paper P&L was a coin flip, while 1d/5d
+# hold-to-close was positive on the watchlist. Everything else stays same-day.
+HOLD_HORIZON_DAYS = {
+    "OVERSOLD_BULL_PULLBACK": 5,
+    "VOLATILITY_EXPANSION_BEAR": 1,
+    "RESISTANCE_PINNED_SHORT_VOL": 1,
+    "WALL_PIN": 1,
+    "DAMPENED_BULL_TREND": 1,
+    "HIGH_VOLATILITY_DANGER_ZONE": 1,
+    "NO_GEX_REGIME": 0,
+}
 
 
 def classify_setup(
@@ -781,6 +830,7 @@ def classify_setup(
         "recommended_strategy": strat,
         "stop_loss": float(stop_loss) if not np.isnan(stop_loss) else np.nan,
         "target_price": float(target_price) if not np.isnan(target_price) else np.nan,
+        "hold_horizon": HOLD_HORIZON_DAYS.get(signal),
     }
 
 
@@ -813,7 +863,10 @@ def calculate_equity_signal(symbol: str) -> Dict:
         )
 
     hist = compute_indicators(hist)
-    latest = hist.iloc[-1]
+    try:
+        latest = last_complete_daily_row(hist)
+    except ValueError:
+        latest = hist.iloc[-1]
 
     rsi = latest.get('RSI', np.nan)
     ema200 = latest.get('EMA_200', np.nan)
@@ -827,30 +880,29 @@ def calculate_equity_signal(symbol: str) -> Dict:
             call_wall=call_wall, put_wall=put_wall, gamma_flip=gamma_flip,
         )
 
-    if earnings_status == "UNKNOWN":
-        return _empty_row(
-            symbol, "EARNINGS_DATA_UNAVAILABLE",
-            "MANUAL CHECK REQUIRED (Earnings Data Unreachable)", 10.0, False,
-            price=round(float(curr_price), 2),
-            rsi=round(float(rsi), 1),
-            gex_1pct_m=round(float(gex_1pct_m), 2),
-            gex_bps=round(float(gex_bps), 4) if not np.isnan(gex_bps) else np.nan,
-            call_wall=round(float(call_wall), 2) if not np.isnan(call_wall) else np.nan,
-            put_wall=round(float(put_wall), 2) if not np.isnan(put_wall) else np.nan,
-            gamma_flip=round(float(gamma_flip), 2) if not np.isnan(gamma_flip) else np.nan,
-        )
-
     classified = classify_setup(
         float(curr_price), float(rsi), float(ema200),
         regime, call_wall, put_wall, gamma_flip,
     )
 
+    # Yahoo's earnings calendar flakes often. Previously that threw away a
+    # finished GEX/technical read and emitted EARNINGS_DATA_UNAVAILABLE with
+    # no setup. Still classify, flag it, haircut the rank, and let the paper
+    # driver skip the open.
+    earnings_ok = earnings_status is False
+    base_score = float(classified["base_score"])
+    if not earnings_ok:
+        base_score = round(base_score * 0.5, 2)
+        strat = "CONFIRM EARNINGS — " + classified["recommended_strategy"]
+    else:
+        strat = classified["recommended_strategy"]
+
     return {
         "symbol": symbol,
         "signal": classified["signal"],
-        "base_score": round(float(classified["base_score"]), 2),
-        "rank_score": round(float(classified["base_score"]), 2),
-        "has_earnings_data": True,
+        "base_score": round(float(base_score), 2),
+        "rank_score": round(float(base_score), 2),
+        "has_earnings_data": bool(earnings_ok),
         "price": round(float(curr_price), 2),
         "rsi": round(float(rsi), 1),
         "gex_1pct_m": round(float(gex_1pct_m), 2),
@@ -862,7 +914,8 @@ def calculate_equity_signal(symbol: str) -> Dict:
                       if not np.isnan(classified["stop_loss"]) else np.nan),
         "target_price": (round(float(classified["target_price"]), 2)
                          if not np.isnan(classified["target_price"]) else np.nan),
-        "recommended_strategy": classified["recommended_strategy"],
+        "hold_horizon": classified.get("hold_horizon"),
+        "recommended_strategy": strat,
     }
 
 
@@ -886,7 +939,6 @@ RESIDUAL_SIGNALS = ["DAMPENED_BULL_TREND"]
 
 AVOID_SIGNALS = [
     "EARNINGS_BLACKOUT_VOL_CRUSH",
-    "EARNINGS_DATA_UNAVAILABLE",
     "HIGH_VOLATILITY_DANGER_ZONE",
 ]
 
@@ -997,7 +1049,8 @@ if __name__ == "__main__":
         print(df_setups[[
             "symbol", "signal", "rank_score", "base_score", "price",
             "rsi", "gex_1pct_m", "gex_bps", "call_wall", "put_wall", "gamma_flip",
-            "stop_loss", "target_price", "recommended_strategy"
+            "stop_loss", "target_price", "hold_horizon", "has_earnings_data",
+            "recommended_strategy"
         ]])
     else:
         print("=== IDENTIFIED SETUPS (ranked) ===")
@@ -1020,7 +1073,7 @@ if __name__ == "__main__":
     if not df_setups.empty:
         top = df_setups.head(5)
         summary = "\n".join(
-            f"{r.symbol} {r.signal} score={r.rank_score} {r.recommended_strategy}"
+            f"{r.symbol} {r.signal} score={r.rank_score} hold={r.hold_horizon}d {r.recommended_strategy}"
             for r in top.itertuples()
         )
         title = f"GEX Scan: {len(df_setups)} setup(s) found"

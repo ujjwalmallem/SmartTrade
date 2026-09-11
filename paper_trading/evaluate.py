@@ -65,6 +65,35 @@ def simulate_same_day(
     return "EOD", float(close), False
 
 
+def simulate_hold(
+    direction: str,
+    stop,
+    target,
+    bars: List[Tuple[str, float, float, float, float]],
+    max_days: int,
+) -> Tuple[str, float, bool, int, str]:
+    """Walk up to `max_days` OHLC bars. Returns
+    (reason, exit_price, ambiguous, sessions_held, exit_date).
+
+    `bars` is [(date, open, high, low, close), ...] starting at the entry
+    session. Overnight gaps are handled by simulate_same_day on each bar's
+    open. If nothing hits by the last bar, reason is TIME (max-hold exit).
+    """
+    if not bars or max_days < 1:
+        return "TIME", np.nan, False, 0, ""
+    use = bars[:max_days]
+    ambiguous = False
+    last_date, last_close = use[-1][0], use[-1][4]
+    for i, (date, o, h, l, c) in enumerate(use):
+        reason, price, amb = simulate_same_day(direction, stop, target, o, h, l, c)
+        ambiguous = ambiguous or amb
+        if reason != "EOD":
+            return reason, price, ambiguous, i + 1, date
+        last_date, last_close = date, c
+    reason = "EOD" if max_days <= 1 else "TIME"
+    return reason, float(last_close), ambiguous, len(use), last_date
+
+
 def _signed_move(direction: str, entry: float, exit_price: float) -> float:
     delta = exit_price - entry
     return -delta if direction == "SHORT" else delta
@@ -83,12 +112,23 @@ def build_closed_trade(
     low: float,
     close: float,
     size_usd: float = POSITION_SIZE_USD,
+    hold_bars: Optional[List[Tuple[str, float, float, float, float]]] = None,
+    max_days: int = 1,
     extra: Optional[Dict] = None,
 ) -> Dict:
-    """Paper-close a same-day equity proxy off one OHLC bar."""
-    reason, exit_price, ambiguous = simulate_same_day(
-        direction, stop_loss, target_price, bar_open, high, low, close,
-    )
+    """Paper-close an equity proxy off one bar (same-day) or a hold path."""
+    if hold_bars:
+        reason, exit_price, ambiguous, sessions, exit_date = simulate_hold(
+            direction, stop_loss, target_price, hold_bars, max_days,
+        )
+        close = hold_bars[min(max(sessions, 1) - 1, len(hold_bars) - 1)][4]
+        extra = dict(extra or {})
+        extra.setdefault("sessions_held", sessions)
+        extra.setdefault("exit_date", exit_date)
+    else:
+        reason, exit_price, ambiguous = simulate_same_day(
+            direction, stop_loss, target_price, bar_open, high, low, close,
+        )
     shares = round(size_usd / float(entry_price), 4)
     pnl_usd = round(_signed_move(direction, entry_price, exit_price) * shares, 2)
     close_move = _signed_move(direction, entry_price, close)

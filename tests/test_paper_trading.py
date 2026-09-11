@@ -18,6 +18,7 @@ class ClassifySetupTests(unittest.TestCase):
         self.assertEqual(row["signal"], "OVERSOLD_BULL_PULLBACK")
         self.assertAlmostEqual(row["stop_loss"], 98.0, places=4)
         self.assertAlmostEqual(row["target_price"], 104.0, places=4)
+        self.assertEqual(row["hold_horizon"], 5)
 
     def test_oversold_still_wins_when_regime_is_negative(self):
         row = gex.classify_setup(100.0, rsi=30.0, ema200=90.0,
@@ -102,6 +103,60 @@ class SimulateSameDayTests(unittest.TestCase):
         self.assertEqual(reason, "TARGET")
         self.assertEqual(price, 95)
         self.assertFalse(amb)
+
+    def test_hold_hits_target_on_later_day(self):
+        bars = [
+            ("2026-01-02", 100, 101, 99, 100.5),
+            ("2026-01-03", 100.5, 102, 100, 101),
+            ("2026-01-06", 101, 105, 100.8, 104.5),
+        ]
+        reason, price, amb, sessions, date = evaluate.simulate_hold(
+            "LONG", 98, 104, bars, max_days=5,
+        )
+        self.assertEqual(reason, "TARGET")
+        self.assertEqual(price, 104)
+        self.assertEqual(sessions, 3)
+        self.assertEqual(date, "2026-01-06")
+        self.assertFalse(amb)
+
+    def test_hold_expires_at_time(self):
+        bars = [
+            ("2026-01-02", 100, 101, 99, 100.5),
+            ("2026-01-03", 100.5, 101.2, 99.8, 100.8),
+        ]
+        reason, price, amb, sessions, date = evaluate.simulate_hold(
+            "LONG", 98, 104, bars, max_days=2,
+        )
+        self.assertEqual(reason, "TIME")
+        self.assertEqual(price, 100.8)
+        self.assertEqual(sessions, 2)
+
+
+class LastCompleteBarTests(unittest.TestCase):
+    def test_uses_yesterday_during_rth(self):
+        idx = pd.to_datetime(["2026-09-10", "2026-09-11"])
+        hist = pd.DataFrame({"Close": [10.0, 11.0]}, index=idx)
+        now = pd.Timestamp("2026-09-11 09:31", tz="America/New_York")
+        row = gex.last_complete_daily_row(hist, now=now)
+        self.assertEqual(float(row["Close"]), 10.0)
+
+    def test_uses_today_after_close(self):
+        idx = pd.to_datetime(["2026-09-10", "2026-09-11"])
+        hist = pd.DataFrame({"Close": [10.0, 11.0]}, index=idx)
+        now = pd.Timestamp("2026-09-11 16:05", tz="America/New_York")
+        row = gex.last_complete_daily_row(hist, now=now)
+        self.assertEqual(float(row["Close"]), 11.0)
+
+
+class HoldExpiryTests(unittest.TestCase):
+    def test_same_day_expires_today(self):
+        pos = {"date": "2026-09-11", "hold_days": 1}
+        self.assertTrue(common.hold_expired(pos, as_of="2026-09-11"))
+        self.assertFalse(common.hold_expired({**pos, "hold_days": 5}, as_of="2026-09-11"))
+        self.assertTrue(common.hold_expired({**pos, "hold_days": 5}, as_of="2026-09-17"))
+
+    def test_weekdays_skip_weekend(self):
+        self.assertEqual(common.weekdays_inclusive("2026-09-11", "2026-09-14"), 2)  # Fri+Mon
 
 
 class ScorecardTests(unittest.TestCase):

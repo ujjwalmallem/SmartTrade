@@ -94,7 +94,7 @@ with the real one (`pwd` inside the repo).
 
 ## Paper trading
 
-Each scanner also drives its own same-day paper-trading loop: `paper_trading/trade_gex.py`
+Each scanner also drives its own paper-trading loop: `paper_trading/trade_gex.py`
 and `paper_trading/trade_er.py`, scheduled via `.github/workflows/paper-trading-gex.yml`
 and `paper-trading-er.yml`. State lives in `paper_trading/ledger_gex.json` /
 `ledger_er.json`, committed back to `develop` by a bot commit after any run that
@@ -108,18 +108,23 @@ not a return estimate for the recommended trade.
 
 - **GEX**: only `OVERSOLD_BULL_PULLBACK` (LONG) and `VOLATILITY_EXPANSION_BEAR`
   (SHORT) get paper-traded, using their real `stop_loss`/`target_price`.
+  Oversold is held up to **5 sessions** (same-day paper P&L was a coin flip;
+  1d/5d drift was positive). Bear stays same-day (5d drift was negative).
   `WALL_PIN`/`RESISTANCE_PINNED_SHORT_VOL` are skipped — they're premium-selling/range
   setups with no honest long/short equity proxy. Each `open` still snapshots the
   full scan into the ledger so those can be graded later (see below).
+  Names whose earnings calendar could not be fetched are classified but **not**
+  paper-opened (`CONFIRM EARNINGS` prefix, score haircut).
 - **ER**: LONG only (the whole ER scoring system is built around upside earnings-reaction
   continuation), picks rows with `Src=="ER"`, `Final >= 3.5`, and a real `React Tgt` — same
   cutoff `er_dashboard.py`'s own notification uses. ER has no native stop, so a flat 3%
   synthetic stop is used (`ER_STOP_PCT` in `trade_er.py`).
 
 **Schedule** (weekdays, both sources): OPEN ~9:31 AM ET · CHECK every 30 min ~10:00 AM–3:30
-PM ET (fetches current price per open position, closes on stop/target hit) · CLOSE (force
-EOD) ~3:55 PM ET, before the 4pm market close. A `check` that finds nothing to close is
-silent — no push. Manually run any single step from the Actions tab → pick the workflow →
+PM ET (fetches current price per open position, closes on stop/target hit) · CLOSE ~3:55 PM
+ET. GEX `close` only expires holds that have reached `hold_days` (same-day names end today;
+oversold swings stay open). A `check` that finds nothing to close is silent — no push.
+Manually run any single step from the Actions tab → pick the workflow →
 Run workflow → choose `open`/`check`/`close`.
 
 Position sizing, the direction map, and the ER synthetic stop are all hand-set constants
@@ -133,7 +138,7 @@ pieces (GEX regime, walls, gamma flip) cannot be rebuilt from Yahoo/Stooq histor
 Two extra commands fill that gap:
 
 ```bash
-# Historical same-day paper replay of the price-only directional rules
+# Historical paper replay (oversold = 5-session hold, bear = same-day)
 python3 -m paper_trading.backtest_gex
 
 # Live ledger P&L (empty until directional setups actually open)
