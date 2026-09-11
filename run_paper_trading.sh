@@ -34,7 +34,24 @@ if [ -n "$(git status --porcelain -- "$LEDGER" 2>/dev/null)" ]; then
     git config user.email "paper-trading-bot@users.noreply.github.com"
     git add "$LEDGER"
     git commit -m "Paper trading (${SOURCE}): ${ACTION} $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    git push
+
+    # The gex and er workflows run on the same cron schedule and both push to
+    # develop, so a rejected push (someone else's commit landed first) is the
+    # expected case, not an error -- rebase onto the latest and retry. Each
+    # source only ever touches its own ledger file, so this never conflicts.
+    attempt=1
+    max_attempts=5
+    until git push; do
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "[run_paper_trading] push failed after ${max_attempts} attempts" >&2
+            exit 1
+        fi
+        echo "[run_paper_trading] push rejected (attempt ${attempt}/${max_attempts}); fetching and rebasing..."
+        sleep "$(( (RANDOM % 5) + 1 ))"
+        git fetch origin develop
+        git rebase origin/develop
+        attempt=$((attempt + 1))
+    done
 else
     echo "[run_paper_trading] ${LEDGER} unchanged, nothing to commit."
 fi
