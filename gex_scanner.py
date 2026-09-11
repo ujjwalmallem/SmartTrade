@@ -47,19 +47,24 @@ from scipy.stats import norm
 from typing import Dict, Tuple, List, Union
 
 
-def notify_ntfy(title: str, message: str) -> None:
+def notify_ntfy(title: str, message: str, tags: str = "") -> None:
     """Push a summary to the user's phone via ntfy.sh. No-op if NTFY_TOPIC is unset."""
     topic = os.environ.get("NTFY_TOPIC")
     if not topic:
         print("[notify] NTFY_TOPIC not set; skipping push notification.")
         return
+    headers = {"Title": title, "Priority": "default"}
+    if tags:
+        headers["Tags"] = tags
     try:
-        requests.post(
+        resp = requests.post(
             f"https://ntfy.sh/{topic}",
             data=message.encode("utf-8"),
-            headers={"Title": title, "Priority": "default"},
+            headers=headers,
             timeout=10,
         )
+        resp.raise_for_status()
+        print(f"[notify] posted {title!r} ({resp.status_code})")
     except requests.RequestException as exc:
         print(f"[notify] Failed to send ntfy push: {exc}")
 

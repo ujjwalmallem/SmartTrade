@@ -48,6 +48,34 @@ HOLD_DAYS = {
 }
 
 
+def format_open_push(opened, df_setups) -> tuple:
+    """Title + body for the daily paper-open ntfy. Always returns a message
+    so a scan that finds only WALL_PIN/etc. still pings the topic."""
+    skipped = []
+    if df_setups is not None and not getattr(df_setups, "empty", True):
+        mask = ~df_setups["signal"].isin(DIRECTION_MAP)
+        skipped = [f"{r.symbol} {r.signal}" for r in df_setups.loc[mask].itertuples()]
+
+    if opened:
+        title = f"Paper GEX: opened {len(opened)}"
+        lines = [
+            f"{p['direction']} {p['symbol']} @ ${p['entry_price']} "
+            f"(stop {p['stop_loss']}, tgt {p['target_price']}, hold {p.get('hold_days', 1)}d)"
+            for p in opened
+        ]
+        if skipped:
+            lines.append("Not paper-traded: " + ", ".join(skipped))
+        return title, "\n".join(lines)
+
+    title = "Paper GEX: no directional trades"
+    lines = ["No OVERSOLD / BEAR setups to paper-trade."]
+    if skipped:
+        lines.append("Present but skipped (no long/short proxy): " + ", ".join(skipped))
+    else:
+        lines.append("No ranked setups on the watchlist this scan.")
+    return title, "\n".join(lines)
+
+
 def do_open():
     ledger = common.load_ledger(LEDGER_PATH)
     df_setups, df_residual, df_avoid = gex.generate_top_trades(gex.WATCHLIST)
@@ -70,13 +98,9 @@ def do_open():
 
     common.save_ledger(LEDGER_PATH, ledger)
 
+    title, body = format_open_push(opened, df_setups)
+    gex.notify_ntfy(title, body, tags="chart_with_upwards_trend")
     if opened:
-        lines = [
-            f"{p['direction']} {p['symbol']} @ ${p['entry_price']} "
-            f"(stop {p['stop_loss']}, tgt {p['target_price']}, hold {p.get('hold_days', 1)}d)"
-            for p in opened
-        ]
-        gex.notify_ntfy(f"Paper GEX: opened {len(opened)}", "\n".join(lines))
         print(f"[paper-gex] opened {len(opened)} position(s)")
     else:
         print("[paper-gex] No directional setups to open today.")
@@ -84,6 +108,15 @@ def do_open():
 
 def do_check():
     ledger = common.load_ledger(LEDGER_PATH)
+    today = common.today_str()
+    # Scheduled OPEN (13:31 UTC) is easily dropped by GitHub's cron delay.
+    # If today's scan isn't on the ledger yet, run open now so a later
+    # CHECK still records the day and pings ntfy.
+    if not any(s.get("date") == today for s in ledger.get("scans", [])):
+        print("[paper-gex] no scan for today; running open first")
+        do_open()
+        ledger = common.load_ledger(LEDGER_PATH)
+
     closed = []
     for pos in list(ledger["open"]):
         price = gex.cache.get_spot_price(pos["symbol"])
@@ -100,7 +133,8 @@ def do_check():
             f"P&L ${p['pnl_usd']} ({p['pnl_pct']:+.1f}%)"
             for p in closed
         ]
-        gex.notify_ntfy(f"Paper GEX: {len(closed)} closed early", "\n".join(lines))
+        gex.notify_ntfy(f"Paper GEX: {len(closed)} closed early", "\n".join(lines),
+                        tags="warning")
         print(f"[paper-gex] closed {len(closed)} position(s) early")
     else:
         print("[paper-gex] check: nothing hit stop/target")
@@ -137,7 +171,7 @@ def do_close():
         summary = (f"Closed {len(closed)} | Total P&L: ${total_pnl} | "
                    f"{wins}/{len(closed)} winners | still open {still_open}\n"
                    + "\n".join(lines))
-        gex.notify_ntfy(f"Paper GEX session: ${total_pnl}", summary)
+        gex.notify_ntfy(f"Paper GEX session: ${total_pnl}", summary, tags="moneybag")
         print(f"[paper-gex] session close: {len(closed)} trade(s), "
               f"total P&L ${total_pnl}, still open {still_open}")
     else:

@@ -123,9 +123,11 @@ not a return estimate for the recommended trade.
 **Schedule** (weekdays, both sources): OPEN ~9:31 AM ET · CHECK every 30 min ~10:00 AM–3:30
 PM ET (fetches current price per open position, closes on stop/target hit) · CLOSE ~3:55 PM
 ET. GEX `close` only expires holds that have reached `hold_days` (same-day names end today;
-oversold swings stay open). A `check` that finds nothing to close is silent — no push.
-Manually run any single step from the Actions tab → pick the workflow →
-Run workflow → choose `open`/`check`/`close`.
+oversold swings stay open). GEX `open` **always** pushes to ntfy, even when nothing
+was paper-traded (today that is usually WALL_PIN / RESISTANCE, which have no
+long/short proxy). A `check` that finds nothing to close is still silent. If the
+9:31 OPEN cron is dropped, the next CHECK runs open first. Manually run any single
+step from the Actions tab → pick the workflow → Run workflow → choose `open`/`check`/`close`.
 
 Position sizing, the direction map, and the ER synthetic stop are all hand-set constants
 at the top of `trade_gex.py`/`trade_er.py` — edit them directly if you want different

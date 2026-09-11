@@ -8,6 +8,32 @@ import pandas as pd
 import gex_scanner as gex
 from paper_trading import common, evaluate
 from paper_trading.backtest_gex import backtest_symbol, in_earnings_blackout
+from paper_trading.trade_gex import format_open_push
+
+
+class OpenPushTests(unittest.TestCase):
+    def test_no_setups_still_has_a_title(self):
+        title, body = format_open_push([], pd.DataFrame())
+        self.assertEqual(title, "Paper GEX: no directional trades")
+        self.assertIn("No OVERSOLD / BEAR", body)
+
+    def test_wall_pin_listed_as_skipped(self):
+        df = pd.DataFrame([
+            {"symbol": "AMD", "signal": "WALL_PIN"},
+            {"symbol": "AAPL", "signal": "OVERSOLD_BULL_PULLBACK"},
+        ])
+        opened = [{"direction": "LONG", "symbol": "AAPL", "entry_price": 100,
+                   "stop_loss": 98, "target_price": 104, "hold_days": 5}]
+        title, body = format_open_push(opened, df)
+        self.assertEqual(title, "Paper GEX: opened 1")
+        self.assertIn("AMD WALL_PIN", body)
+        self.assertIn("LONG AAPL", body)
+
+    def test_only_skipped_setups(self):
+        df = pd.DataFrame([{"symbol": "AMD", "signal": "WALL_PIN"}])
+        title, body = format_open_push([], df)
+        self.assertEqual(title, "Paper GEX: no directional trades")
+        self.assertIn("AMD WALL_PIN", body)
 
 
 class ClassifySetupTests(unittest.TestCase):
