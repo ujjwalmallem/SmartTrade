@@ -1,8 +1,8 @@
 name: Daily ER Dashboard
 
 on:
-  schedule:
-    - cron: "45 20 * * 1-5"   # 4:45 PM ET = 20:45 UTC (shortly after market close)
+  repository_dispatch:
+    types: [daily-er-scan]
   workflow_dispatch:
 
 jobs:
@@ -24,5 +24,5 @@ jobs:
 
       - name: Run ER dashboard
         env:
-          NTFY_TOPIC: smarttrade-er-7bfbe66211d7
+          NTFY_TOPIC: smarttrade-gex-7bfbe66211d7
         run: bash run_er_scan.sh
