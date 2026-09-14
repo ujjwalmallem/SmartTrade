@@ -1,8 +1,8 @@
 name: Daily GEX Scan
 
 on:
-  schedule:
-    - cron: "35 13 * * 1-5"   # 9:35 AM ET = 13:35 UTC (5 min after market open, so it has a live opening quote)
+  repository_dispatch:
+    types: [daily-gex-scan]
   workflow_dispatch:
 
 jobs:
