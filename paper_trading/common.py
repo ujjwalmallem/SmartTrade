@@ -24,6 +24,10 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+# Fixed dollar notional per paper position (not a fixed option-contract
+# count). Dollar risk is then notional * stop_distance / entry. True
+# stop-risk sizing would change live-ledger comparability, so this stays
+# the paper unit.
 POSITION_SIZE_USD = 1000.0
 
 

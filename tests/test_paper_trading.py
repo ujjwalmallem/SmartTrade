@@ -1,5 +1,6 @@
 """Unit tests for GEX classify_setup, OHLC paper path, and backtest walk."""
 
+import time
 import unittest
 
 import numpy as np
@@ -82,6 +83,99 @@ class ClassifySetupTests(unittest.TestCase):
                                  regime="POSITIVE_GEX", call_wall=120.0,
                                  put_wall=80.0, gamma_flip=95.0)
         self.assertEqual(row["signal"], "DAMPENED_BULL_TREND")
+
+
+class GexHardeningTests(unittest.TestCase):
+    def test_zero_dte_gamma_is_finite_and_capped(self):
+        S, K = 100.0, np.array([100.0])
+        sig = np.array([0.20])
+        g0 = gex.calculate_vectorized_bs_gamma(S, K, np.array([0.0]), 0.045, sig)
+        g_floor = gex.calculate_vectorized_bs_gamma(
+            S, K, np.array([gex.MIN_DTE_DAYS / 365.0]), 0.045, sig)
+        self.assertTrue(np.isfinite(g0[0]) and g0[0] > 0)
+        self.assertAlmostEqual(float(g0[0]), float(g_floor[0]), places=8)
+        tiny_t = np.array([1e-8])
+        g_tiny = gex.calculate_vectorized_bs_gamma(S, K, tiny_t, 0.045, sig)
+        uncapped = 1.0 / (S * 0.20 * np.sqrt(tiny_t[0]) * np.sqrt(2.0 * np.pi))
+        self.assertLess(float(g_tiny[0]), uncapped)
+
+    def test_dividend_yield_lowers_atm_gamma(self):
+        S, K = 100.0, np.array([100.0])
+        T = np.array([30.0 / 365.0])
+        sig = np.array([0.25])
+        g0 = gex.calculate_vectorized_bs_gamma(S, K, T, 0.045, sig, q=0.0)
+        gq = gex.calculate_vectorized_bs_gamma(S, K, T, 0.045, sig, q=0.05)
+        self.assertLess(float(gq[0]), float(g0[0]))
+
+    def test_customer_signed_calls_positive(self):
+        # Positive call GEX, negative put GEX is the documented convention.
+        S = 100.0
+        K = np.array([100.0, 100.0])
+        T = np.array([30 / 365.0, 30 / 365.0])
+        sig = np.array([0.2, 0.2])
+        gamma = gex.calculate_vectorized_bs_gamma(S, K, T, 0.045, sig)
+        raw = gamma * np.array([10.0, 10.0]) * 100.0 * (S ** 2) * 0.01 * 1e-6
+        signed = np.where(np.array([True, False]), raw, -raw)
+        self.assertGreater(signed[0], 0)
+        self.assertLess(signed[1], 0)
+
+    def test_mcap_nan_miss_is_cached(self):
+        mgr = gex.TickerCacheManager()
+        mgr.mcap_cache["ZZZ"] = (time.time(), np.nan)
+
+        def boom(_symbol):
+            raise AssertionError("NaN market-cap miss should be cached")
+
+        mgr.get_ticker = boom
+        self.assertTrue(np.isnan(mgr.get_market_cap("ZZZ")))
+
+    def test_dividend_yield_miss_is_cached(self):
+        mgr = gex.TickerCacheManager()
+        mgr.div_cache["ZZZ"] = (time.time(), 0.0)
+
+        def boom(_symbol):
+            raise AssertionError("dividend yield should be cached")
+
+        mgr.get_ticker = boom
+        self.assertEqual(mgr.get_dividend_yield("ZZZ"), 0.0)
+
+    def test_wall_at_band_edge(self):
+        spot = 100.0
+        edge_call = spot * (1.0 + gex.WALL_MAX_DIST_DEFAULT)
+        self.assertTrue(gex.wall_at_band_edge(edge_call, spot, "call"))
+        self.assertFalse(gex.wall_at_band_edge(spot * 1.05, spot, "call"))
+        edge_put = spot * (1.0 - gex.WALL_MAX_DIST_DEFAULT)
+        self.assertTrue(gex.wall_at_band_edge(edge_put, spot, "put"))
+        self.assertFalse(gex.wall_at_band_edge(spot * 0.95, spot, "put"))
+        self.assertFalse(gex.wall_at_band_edge(np.nan, spot, "call"))
+
+    def test_spread_width_scales_with_atr(self):
+        # $100 name, grid $5. Missing ATR keeps the old 2-step default.
+        self.assertEqual(gex.spread_width_steps(100.0, np.nan), 2)
+        # KO-like: ATR $1 on a $5 grid -> int(1/5)=0, floor at 2.
+        self.assertEqual(gex.spread_width_steps(100.0, 1.0), 2)
+        # NVDA-like: ATR $20 on a $180 name, grid $5 -> 4 steps.
+        self.assertEqual(gex.spread_width_steps(180.0, 20.0), 4)
+
+    def test_earnings_dates_use_et_calendar_day(self):
+        # 20:00 UTC is still the same ET calendar date (16:00 ET).
+        ts = pd.Timestamp("2026-01-15 20:00:00", tz="UTC")
+        day = gex._as_naive_et_day(ts)
+        self.assertEqual(day, pd.Timestamp("2026-01-15"))
+        late = pd.Timestamp("2026-01-16 03:00:00", tz="UTC")  # 22:00 ET previous day
+        self.assertEqual(gex._as_naive_et_day(late), pd.Timestamp("2026-01-15"))
+
+    def test_gamma_flip_crosses_with_q(self):
+        # Heavy OTM calls vs puts so net customer GEX changes sign in the window.
+        K = np.array([90.0, 110.0])
+        T = np.array([30 / 365.0, 30 / 365.0])
+        sig = np.array([0.25, 0.25])
+        oi = np.array([5000.0, 5000.0])
+        is_call = np.array([False, True])
+        flip = gex.compute_gamma_flip(100.0, K, T, sig, oi, is_call, 0.045, q=0.02)
+        self.assertTrue(np.isfinite(flip))
+        self.assertGreater(flip, 80.0)
+        self.assertLess(flip, 120.0)
 
 
 class SimulateSameDayTests(unittest.TestCase):
@@ -169,11 +263,21 @@ class LastCompleteBarTests(unittest.TestCase):
         row = gex.last_complete_daily_row(hist, now=now)
         self.assertEqual(float(row["Close"]), 10.0)
 
-    def test_uses_today_after_close(self):
+    def test_uses_today_after_close_grace(self):
         idx = pd.to_datetime(["2026-09-10", "2026-09-11"])
         hist = pd.DataFrame({"Close": [10.0, 11.0]}, index=idx)
-        now = pd.Timestamp("2026-09-11 16:05", tz="America/New_York")
-        row = gex.last_complete_daily_row(hist, now=now)
+        still_open = gex.last_complete_daily_row(
+            hist, now=pd.Timestamp("2026-09-11 16:05", tz="America/New_York"))
+        self.assertEqual(float(still_open["Close"]), 10.0)
+        finalized = gex.last_complete_daily_row(
+            hist, now=pd.Timestamp("2026-09-11 16:20", tz="America/New_York"))
+        self.assertEqual(float(finalized["Close"]), 11.0)
+
+    def test_ignores_bars_after_as_of(self):
+        idx = pd.to_datetime(["2026-09-10", "2026-09-11", "2026-09-12"])
+        hist = pd.DataFrame({"Close": [10.0, 11.0, 99.0]}, index=idx)
+        row = gex.last_complete_daily_row(
+            hist, now=pd.Timestamp("2026-09-11 16:20", tz="America/New_York"))
         self.assertEqual(float(row["Close"]), 11.0)
 
 
@@ -262,6 +366,9 @@ class BacktestWalkTests(unittest.TestCase):
         self.assertTrue(all(t["signal"] == "OVERSOLD_BULL_PULLBACK" for t in trades))
         self.assertTrue(all(t["direction"] == "LONG" for t in trades))
         self.assertTrue(all(t["stop_loss"] is not None for t in trades))
+        self.assertTrue(all(t["hold_days"] == gex.HOLD_HORIZON_DAYS["OVERSOLD_BULL_PULLBACK"]
+                            for t in trades))
+        self.assertTrue(all(t["hold_days"] == 5 for t in trades))
 
     def test_gap_below_ema_is_not_filled(self):
         """Prior close is oversold-above-EMA; next open gaps under the EMA."""

@@ -376,8 +376,22 @@ def get_eps_surprise(ticker):
 
 
 # ====================== BASIC INFO ======================
+_INFO_CACHE = {}
+_INFO_MISS_TTL = 60.0
+_INFO_HIT_TTL = 300.0
+
+
 def get_basic_info(ticker):
-    """Sector / short interest / analyst target. Missing values stay NaN."""
+    """Sector / short interest / analyst target. Missing values stay NaN.
+    Cached so a failed `.info` is not retried on every ticker in the same run."""
+    now = time.time()
+    hit = _INFO_CACHE.get(ticker)
+    if hit is not None:
+        ts, out = hit
+        ttl = _INFO_HIT_TTL if out.get("ok") else _INFO_MISS_TTL
+        if now - ts < ttl:
+            return out
+
     out = {
         "name": ticker,
         "sector": None,
@@ -388,6 +402,7 @@ def get_basic_info(ticker):
     }
     info = with_retries(lambda: yf.Ticker(ticker).info, label=f"{ticker} info")
     if not info:
+        _INFO_CACHE[ticker] = (now, out)
         return out
 
     def num(key):
@@ -408,6 +423,7 @@ def get_basic_info(ticker):
     out["current_price"] = price
     out["target_mean"] = num("targetMeanPrice")
     out["ok"] = True
+    _INFO_CACHE[ticker] = (now, out)
     return out
 
 
@@ -488,11 +504,20 @@ def iter_er_events(df, earnings_dates):
     Used by the historical paper backtest so it shares the live window
     (ER_WINDOW_BEFORE/AFTER) and RVOL definition. Does not compute
     follow-through — that would leak the thing we are trying to predict.
-    RVOL is measured on df through the gap bar only (no later sessions).
+
+    Causal: on each session in the ER window, the gap is picked from
+    `signed_gaps` *through that session only*. A later closer print cannot
+    rewrite an earlier day's choice. RVOL uses the gap bar and the lookback
+    before it; later volume is dropped via last_complete with historical now.
     """
     if df is None or len(df) < RVOL_LOOKBACK + 2:
         return
-    gaps = signed_gaps(df)
+    work = df.copy()
+    work.index = pd.to_datetime(work.index)
+    if getattr(work.index, "tz", None) is not None:
+        work.index = work.index.tz_convert(None)
+    work.index = work.index.normalize()
+    gaps = signed_gaps(work)
     if gaps.empty:
         return
     seen = set()
@@ -501,23 +526,35 @@ def iter_er_events(df, earnings_dates):
         if er_ts.tzinfo is not None:
             er_ts = er_ts.tz_convert(None)
         er_ts = er_ts.normalize()
-        gap_date, gap, source, _alts = pick_gap_in_window(gaps, er_ts)
-        if source != "ER" or gap_date is None or gap_date in seen:
-            continue
-        seen.add(gap_date)
-        pos = df.index.get_loc(gap_date)
-        if not isinstance(pos, (int, np.integer)):
-            continue
-        pos = int(pos)
-        known = df.iloc[: pos + 1]
-        yield {
-            "er_date": er_ts,
-            "gap_date": gap_date,
-            "gap": float(gap),
-            "rvol": rvol_at(known, pos),
-            "pos": pos,
-            "alt_gaps": _alts,
-        }
+        lo = er_ts - pd.Timedelta(days=ER_WINDOW_BEFORE + 2)
+        hi = er_ts + pd.Timedelta(days=ER_WINDOW_AFTER + 2)
+        days = [pd.Timestamp(d).normalize() for d in work.index
+                if lo <= pd.Timestamp(d).normalize() <= hi]
+        for day in days:
+            known_gaps = gaps[gaps.index <= day]
+            gap_date, gap, source, alts = pick_gap_in_window(known_gaps, er_ts)
+            if source != "ER" or gap_date is None:
+                continue
+            gap_date = pd.Timestamp(gap_date).normalize()
+            if gap_date != day or gap_date in seen:
+                continue
+            seen.add(gap_date)
+            as_of = gap_date.tz_localize("America/New_York") + pd.Timedelta(hours=16, minutes=20)
+            clipped = last_complete_daily_frame(work, now=as_of)
+            if clipped is None or clipped.empty or gap_date not in clipped.index:
+                continue
+            pos = clipped.index.get_loc(gap_date)
+            if not isinstance(pos, (int, np.integer)):
+                continue
+            pos = int(pos)
+            yield {
+                "er_date": er_ts,
+                "gap_date": gap_date,
+                "gap": float(gap),
+                "rvol": rvol_at(clipped, pos),
+                "pos": int(work.index.get_loc(gap_date)) if gap_date in work.index else pos,
+                "alt_gaps": alts,
+            }
 
 
 def compute_reaction(df, last_er=None):

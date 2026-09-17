@@ -3,6 +3,12 @@ Paper-trades GEX scanner setups on the underlying stock, not the actual
 options strategy each signal recommends. See paper_trading/common.py for
 exactly what that does and does not simulate.
 
+Lookahead: `open` ranks from generate_top_trades (live spot/walls/GEX,
+RSI/EMA from last_complete_daily_row). `check`/`close` mark the live
+quote against those scan-time stops — they do not rebuild walls from a
+later chain. `score` grades stored scans against that session's OHLC and
+is evaluation, not a trading input.
+
 Only signals with a clean directional read get paper-traded:
     OVERSOLD_BULL_PULLBACK      -> LONG
     VOLATILITY_EXPANSION_BEAR   -> SHORT
@@ -94,6 +100,9 @@ def do_open():
                 hold_days=HOLD_DAYS.get(row["signal"], 1),
             )
             if pos:
+                src = gex.cache.history_source.get(row["symbol"], "yahoo")
+                print(f"[paper-gex] opened {pos['symbol']} src={src} "
+                      f"hold={pos.get('hold_days', 1)}d")
                 opened.append(pos)
 
     common.save_ledger(LEDGER_PATH, ledger)

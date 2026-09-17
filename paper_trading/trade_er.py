@@ -122,6 +122,10 @@ def do_open():
             hold_days=hold_days,
         )
         if pos:
+            flags = str(row.get("Flags") or "")
+            src = "stooq" if "price-src:stooq" in flags else "yahoo"
+            print(f"[paper-er] opened {pos['symbol']} src={src} "
+                  f"hold={pos.get('hold_days', 1)}d flags={flags}")
             opened.append(pos)
 
     common.save_ledger(LEDGER_PATH, ledger)
