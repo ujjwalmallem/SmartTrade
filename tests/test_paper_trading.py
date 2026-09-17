@@ -340,9 +340,52 @@ class ErDashboardGateTests(unittest.TestCase):
         now = pd.Timestamp("2026-09-11 09:31", tz="America/New_York")
         trimmed = er.last_complete_daily_frame(df, now=now)
         self.assertEqual(float(trimmed["Close"].iloc[-1]), 10.0)
-        after = er.last_complete_daily_frame(
+
+    def test_last_complete_bar_waits_grace_after_close(self):
+        idx = pd.to_datetime(["2026-09-10", "2026-09-11"])
+        df = pd.DataFrame({"Close": [10.0, 11.0]}, index=idx)
+        still_open = er.last_complete_daily_frame(
             df, now=pd.Timestamp("2026-09-11 16:05", tz="America/New_York"))
-        self.assertEqual(float(after["Close"].iloc[-1]), 11.0)
+        self.assertEqual(float(still_open["Close"].iloc[-1]), 10.0)
+        finalized = er.last_complete_daily_frame(
+            df, now=pd.Timestamp("2026-09-11 16:20", tz="America/New_York"))
+        self.assertEqual(float(finalized["Close"].iloc[-1]), 11.0)
+
+    def test_penny_price_is_not_actionable(self):
+        self.assertFalse(er.is_paper_candidate(self._row(Price=2.0)))
+
+    def test_hold_days_shrink_when_entered_late(self):
+        self.assertEqual(er.hold_days_remaining(0), 3)
+        self.assertEqual(er.hold_days_remaining(1), 2)
+
+    def test_sector_alias_maps_electronic_technology(self):
+        etf, flag = er.map_sector_etf("Electronic Technology")
+        self.assertEqual(etf, "XLK")
+        self.assertIn("sector-map", flag)
+
+    def test_er_window_picks_closest_not_largest(self):
+        idx = pd.to_datetime(["2026-01-05", "2026-01-06", "2026-01-07"])
+        gaps = pd.Series([5.0, -8.0, 1.0], index=idx)
+        gap_date, gap, source, alts = er.pick_gap_in_window(
+            gaps, last_er=pd.Timestamp("2026-01-06"))
+        self.assertEqual(source, "ER")
+        self.assertEqual(pd.Timestamp(gap_date), pd.Timestamp("2026-01-06"))
+        self.assertEqual(gap, -8.0)
+        self.assertTrue(any(abs(g - 5.0) < 1e-9 for _, g in alts))
+
+    def test_rvol_uses_median_not_mean(self):
+        n = 25
+        idx = pd.bdate_range("2024-01-02", periods=n)
+        vol = np.full(n, 1_000_000.0)
+        vol[10] = 20_000_000.0  # spike in the lookback
+        vol[-1] = 4_000_000.0
+        df = pd.DataFrame({
+            "Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.0,
+            "Volume": vol,
+        }, index=idx)
+        rvol = er.rvol_at(df, n - 1)
+        # median of the 20 prior bars stays ~1e6 despite the spike
+        self.assertAlmostEqual(rvol, 4.0, places=2)
 
 
 class ErOpenPushTests(unittest.TestCase):
