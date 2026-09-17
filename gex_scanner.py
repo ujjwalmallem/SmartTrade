@@ -196,6 +196,7 @@ class TickerCacheManager:
         self.spot_cache: Dict[str, Tuple[float, float]] = {}
         self.mcap_cache: Dict[str, Tuple[float, float]] = {}
         self.div_cache: Dict[str, Tuple[float, float]] = {}
+        self.history_source: Dict[str, str] = {}
         self.mcap_miss_ttl = 60.0  # cache NaN misses briefly so a 403 isn't retried every ticker
 
     def get_ticker(self, symbol: str) -> yf.Ticker:
@@ -216,13 +217,17 @@ class TickerCacheManager:
         t = self.get_ticker(symbol)
         df = with_retries(lambda: t.history(period=period, auto_adjust=auto_adjust),
                           label=f"{symbol} history")
+        src = "yahoo"
         if df is None or df.empty:
             fallback = fetch_stooq_history(symbol)
             if fallback is not None and not fallback.empty:
                 print(f"[stooq] {symbol}: history backfilled from Stooq ({len(fallback)} rows)")
                 df = fallback
+                src = "stooq"
             else:
                 df = pd.DataFrame()
+                src = "none"
+        self.history_source[symbol] = src
         self.history_cache[key] = (now, df)
         return df
 
@@ -614,25 +619,9 @@ def calculate_gex_and_walls(symbol: str, r: float = 0.045) -> Tuple[float, float
         # correct value; treat a wall within one strike of the edge with suspicion.
         WALL_MAX_DIST = WALL_MAX_DIST_DEFAULT
 
-        calls = valid_chain[valid_chain['type'] == 'call']
-        puts = valid_chain[valid_chain['type'] == 'put']
+        call_wall, put_wall = select_oi_walls(valid_chain, curr_price, WALL_MAX_DIST)
 
-        call_side = calls[
-            (calls['strike'] >= curr_price) &
-            (calls['strike'] <= curr_price * (1.0 + WALL_MAX_DIST))
-        ]
-        put_side = puts[
-            (puts['strike'] <= curr_price) &
-            (puts['strike'] >= curr_price * (1.0 - WALL_MAX_DIST))
-        ]
-
-        call_oi = call_side.groupby('strike')['openInterest'].sum()
-        put_oi = put_side.groupby('strike')['openInterest'].sum()
-
-        call_wall = float(call_oi.idxmax()) if not call_oi.empty else np.nan
-        put_wall = float(put_oi.idxmax()) if not put_oi.empty else np.nan
-
-        # Gamma flip: spot price at which net dealer gamma changes sign.
+        # Gamma flip: customer-signed net gamma changes sign (dealer is opposite).
         # See compute_gamma_flip for why this is not a cumulative sum over strikes.
         net_gex_by_strike = valid_chain.groupby('strike')['signed_gex'].sum().sort_index()
 
@@ -661,6 +650,31 @@ def calculate_gex_and_walls(symbol: str, r: float = 0.045) -> Tuple[float, float
 
     except Exception:
         return (np.nan, np.nan, "NO_DATA", np.nan, np.nan, np.nan, np.nan)
+
+
+def select_oi_walls(
+    chain: pd.DataFrame,
+    spot: float,
+    max_dist: float = WALL_MAX_DIST_DEFAULT,
+) -> Tuple[float, float]:
+    """Call wall = max call OI in [spot, spot*(1+max_dist)]; put wall = max
+    put OI in [spot*(1-max_dist), spot]. Un-netted by side. Pure function so
+    tests can pin the OI-constraint without hitting Yahoo."""
+    if chain is None or chain.empty or not np.isfinite(spot) or spot <= 0:
+        return np.nan, np.nan
+    calls = chain[chain["type"] == "call"]
+    puts = chain[chain["type"] == "put"]
+    call_side = calls[
+        (calls["strike"] >= spot) & (calls["strike"] <= spot * (1.0 + max_dist))
+    ]
+    put_side = puts[
+        (puts["strike"] <= spot) & (puts["strike"] >= spot * (1.0 - max_dist))
+    ]
+    call_oi = call_side.groupby("strike")["openInterest"].sum()
+    put_oi = put_side.groupby("strike")["openInterest"].sum()
+    call_wall = float(call_oi.idxmax()) if not call_oi.empty else np.nan
+    put_wall = float(put_oi.idxmax()) if not put_oi.empty else np.nan
+    return call_wall, put_wall
 
 
 def compute_gamma_flip(
@@ -734,21 +748,16 @@ def get_grid_step(price: float) -> float:
 def spread_width_steps(
     price: float,
     atr: float = np.nan,
-    min_steps: int = 1,
+    min_steps: int = 2,
     max_steps: int = 8,
     default_steps: int = 2,
 ) -> int:
-    """Spread width in strike-grid steps.
-
-    A fixed 2-step wing is $10 on a $100 name (grid $5) — tight vs NVDA's
-    ATR and wide vs KO. Scale the wing to about one ATR when ATR is known;
-    keep the old 2-step default when it is not.
-    """
+    """Spread width in strike-grid steps: max(2, int(ATR / grid_step))."""
     step = get_grid_step(price)
     if not np.isfinite(atr) or atr <= 0 or step <= 0:
         return int(default_steps)
-    steps = int(np.ceil(float(atr) / step))
-    return int(np.clip(steps, min_steps, max_steps))
+    steps = max(int(min_steps), int(float(atr) / step))
+    return int(min(steps, max_steps))
 
 
 def wall_at_band_edge(
@@ -757,14 +766,13 @@ def wall_at_band_edge(
     side: str,
     max_dist: float = WALL_MAX_DIST_DEFAULT,
 ) -> bool:
-    """True when the chosen wall sits within one grid step of the 12% band
-    edge — the distance constraint is binding, not a real OI cluster."""
+    """True when the chosen wall sits within 1% of the 12% band edge —
+    the distance constraint is binding, not a real OI cluster."""
     if wall is None or not np.isfinite(wall) or not np.isfinite(spot) or spot <= 0:
         return False
-    step = get_grid_step(spot)
     if side == "call":
-        return float(wall) >= spot * (1.0 + max_dist) - step
-    return float(wall) <= spot * (1.0 - max_dist) + step
+        return float(wall) >= spot * (1.0 + max_dist - 0.01)
+    return float(wall) <= spot * (1.0 - max_dist + 0.01)
 
 
 def build_spread_strikes(
@@ -801,14 +809,18 @@ def build_spread_strikes(
     return float(curr_price), float(curr_price)
 
 
-def clamp_below(level: float, spot: float, near: float = 0.02, far: float = 0.08) -> float:
+def clamp_below(level: float, spot: float, near: float = 0.02, far: float = 0.08,
+                atr: float = np.nan) -> float:
     """
     Pin a level strictly below spot, between `near` and `far` fractional distance.
 
     One-sided clamps were the source of 17%-wide stops: min(wall, spot*0.98)
     guarantees the level sits below spot but puts no floor under how far below.
     Falls back to the `near` bound when the reference level is missing.
+    When ATR is known, the band is at least half a day's range and at most
+    1.25 ATR, capped so a high-ATR name is not stopped out by a 2% tick.
     """
+    near, far = _atr_scaled_band(spot, atr, near, far)
     lo = spot * (1.0 - far)
     hi = spot * (1.0 - near)
     if level is None or np.isnan(level):
@@ -816,13 +828,26 @@ def clamp_below(level: float, spot: float, near: float = 0.02, far: float = 0.08
     return float(min(max(level, lo), hi))
 
 
-def clamp_above(level: float, spot: float, near: float = 0.02, far: float = 0.08) -> float:
+def clamp_above(level: float, spot: float, near: float = 0.02, far: float = 0.08,
+                atr: float = np.nan) -> float:
     """Pin a level strictly above spot, between `near` and `far` fractional distance."""
+    near, far = _atr_scaled_band(spot, atr, near, far)
     lo = spot * (1.0 + near)
     hi = spot * (1.0 + far)
     if level is None or np.isnan(level):
         return float(lo)
     return float(min(max(level, lo), hi))
+
+
+def _atr_scaled_band(spot: float, atr: float, near: float, far: float) -> Tuple[float, float]:
+    if not np.isfinite(atr) or atr <= 0 or not np.isfinite(spot) or spot <= 0:
+        return float(near), float(far)
+    frac = float(atr) / float(spot)
+    near2 = float(min(max(near, 0.5 * frac), 0.05))
+    far2 = float(min(max(far, 1.25 * frac), 0.15))
+    if far2 < near2:
+        far2 = near2
+    return near2, far2
 
 
 def last_complete_daily_row(hist: pd.DataFrame, now=None) -> pd.Series:
@@ -926,7 +951,7 @@ def classify_setup(
     bounds (same as a live scan that couldn't locate a wall). When `regime`
     is neither POSITIVE_GEX nor NEGATIVE_GEX, wall/oversold branches still
     fire (they don't need a regime), and anything leftover is NO_GEX_REGIME
-    so a historical backtest doesn't pretend it saw dealer gamma.
+    so a historical backtest doesn't pretend it saw customer gamma.
     """
     at_call_wall_band = (
         not np.isnan(call_wall) and
@@ -941,8 +966,8 @@ def classify_setup(
         sell_st, buy_st = build_spread_strikes(curr_price, put_wall, "BULL_PUT", width_steps)
         strat = f"Bull Put Spread ${sell_st:.1f}/${buy_st:.1f}"
         stop_loss = clamp_below(put_wall * 0.98 if not np.isnan(put_wall) else np.nan,
-                                curr_price, near=0.02, far=0.08)
-        target_price = clamp_above(np.nan, curr_price, near=0.04, far=0.04)
+                                curr_price, near=0.02, far=0.08, atr=atr)
+        target_price = clamp_above(np.nan, curr_price, near=0.04, far=0.04, atr=atr)
 
     elif at_call_wall_band and rsi > 68:
         signal = "RESISTANCE_PINNED_SHORT_VOL"
@@ -950,8 +975,8 @@ def classify_setup(
         sell_st, buy_st = build_spread_strikes(curr_price, call_wall, "BEAR_CALL", width_steps)
         strat = f"Bear Call Spread ${sell_st:.1f}/${buy_st:.1f}"
         stop_loss = clamp_above(call_wall * 1.02 if not np.isnan(call_wall) else np.nan,
-                                curr_price, near=0.03, far=0.06)
-        target_price = clamp_below(gamma_flip, curr_price, near=0.01, far=0.03)
+                                curr_price, near=0.03, far=0.06, atr=atr)
+        target_price = clamp_below(gamma_flip, curr_price, near=0.01, far=0.03, atr=atr)
 
     elif at_call_wall_band:
         signal = "WALL_PIN"
@@ -959,15 +984,15 @@ def classify_setup(
         strat = "Iron Condor / Short Volatility"
         # Upside breach only; a condor's downside leg needs its own level if traded
         stop_loss = clamp_above(call_wall * 1.02 if not np.isnan(call_wall) else np.nan,
-                                curr_price, near=0.03, far=0.06)
+                                curr_price, near=0.03, far=0.06, atr=atr)
         target_price = curr_price * 1.005
 
     elif regime == "POSITIVE_GEX":
         signal = "DAMPENED_BULL_TREND"
         base_score = 30.0
         strat = "Covered Calls / Cash-Secured Puts"
-        stop_loss = clamp_below(gamma_flip, curr_price, near=0.03, far=0.08)
-        target_price = clamp_above(call_wall, curr_price, near=0.02, far=0.10)
+        stop_loss = clamp_below(gamma_flip, curr_price, near=0.03, far=0.08, atr=atr)
+        target_price = clamp_above(call_wall, curr_price, near=0.02, far=0.10, atr=atr)
 
     elif regime == "NEGATIVE_GEX":
         if rsi < 40 and curr_price < ema200:
@@ -976,9 +1001,9 @@ def classify_setup(
             buy_st, sell_st = build_spread_strikes(curr_price, put_wall, "BEAR_PUT", width_steps)
             strat = f"Bear Put Debit Spread ${buy_st:.1f}/${sell_st:.1f}"
             ref_stop = gamma_flip if not np.isnan(gamma_flip) else ema200
-            stop_loss = clamp_above(ref_stop, curr_price, near=0.03, far=0.08)
+            stop_loss = clamp_above(ref_stop, curr_price, near=0.03, far=0.08, atr=atr)
             target_price = clamp_below(put_wall * 0.95 if not np.isnan(put_wall) else np.nan,
-                                       curr_price, near=0.05, far=0.15)
+                                       curr_price, near=0.05, far=0.15, atr=atr)
         else:
             signal = "HIGH_VOLATILITY_DANGER_ZONE"
             base_score = 15.0

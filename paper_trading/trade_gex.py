@@ -100,6 +100,9 @@ def do_open():
                 hold_days=HOLD_DAYS.get(row["signal"], 1),
             )
             if pos:
+                src = gex.cache.history_source.get(row["symbol"], "yahoo")
+                print(f"[paper-gex] opened {pos['symbol']} src={src} "
+                      f"hold={pos.get('hold_days', 1)}d")
                 opened.append(pos)
 
     common.save_ledger(LEDGER_PATH, ledger)

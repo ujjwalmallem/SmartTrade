@@ -152,10 +152,10 @@ class GexHardeningTests(unittest.TestCase):
     def test_spread_width_scales_with_atr(self):
         # $100 name, grid $5. Missing ATR keeps the old 2-step default.
         self.assertEqual(gex.spread_width_steps(100.0, np.nan), 2)
-        # KO-like: ATR $1 -> 1 step.
-        self.assertEqual(gex.spread_width_steps(100.0, 1.0), 1)
-        # NVDA-like: ATR $12 on a $180 name, grid $5 -> 3 steps.
-        self.assertEqual(gex.spread_width_steps(180.0, 12.0), 3)
+        # KO-like: ATR $1 on a $5 grid -> int(1/5)=0, floor at 2.
+        self.assertEqual(gex.spread_width_steps(100.0, 1.0), 2)
+        # NVDA-like: ATR $20 on a $180 name, grid $5 -> 4 steps.
+        self.assertEqual(gex.spread_width_steps(180.0, 20.0), 4)
 
     def test_earnings_dates_use_et_calendar_day(self):
         # 20:00 UTC is still the same ET calendar date (16:00 ET).

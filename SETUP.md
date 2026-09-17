@@ -3,10 +3,10 @@
 This repo has two independent scanners, each with its own script, its own
 `run_*.sh` wrapper, and its own GitHub Actions workflow:
 
-| Scanner | Script | Wrapper | Workflow | ntfy topic |
+| Scanner | Script | Wrapper | Workflow | ntfy |
 |---|---|---|---|---|
-| Gamma exposure (GEX) | `gex_scanner.py` | `run_gex_scan.sh` | `.github/workflows/daily-gex-scan.yml` | `smarttrade-gex-bb4b87815d16` |
-| Earnings reaction (ER) | `er_dashboard.py` | `run_er_scan.sh` | `.github/workflows/daily-er-scan.yml` | `smarttrade-er-7bfbe66211d7` |
+| Gamma exposure (GEX) | `gex_scanner.py` | `run_gex_scan.sh` | `.github/workflows/daily-gex-scan.yml` | `$NTFY_TOPIC` |
+| Earnings reaction (ER) | `er_dashboard.py` | `run_er_scan.sh` | `.github/workflows/daily-er-scan.yml` | `$NTFY_TOPIC` |
 
 On top of that, each scanner also has a **paper-trading** loop that opens
 positions near market open and closes them by end of day — see
@@ -49,11 +49,10 @@ pip install -r requirements.txt
 ## 2. Get push notifications on your phone (ntfy.sh, no signup)
 
 1. Install the **ntfy** app: [App Store](https://apps.apple.com/app/ntfy/id1625396347) or [Google Play](https://play.google.com/store/apps/details?id=io.heckel.ntfy).
-2. Subscribe to whichever topic(s) you want alerts from (see table above) —
-   tap **+** in the app and enter the topic name exactly.
-3. That's it — no account, no API key. Topic names are public strings, so
-   they're long random values on purpose; don't share them if you'd rather
-   keep the channel private.
+2. Choose a private topic string, subscribe to it in the app, and export
+   `NTFY_TOPIC` in your environment (or in `run_*.sh`). Do not commit the topic
+   name. If `NTFY_TOPIC` is unset, scans still print to stdout and skip the push.
+3. That's it — no account, no API key.
 
 ## 3. Run one locally to confirm it works
 
