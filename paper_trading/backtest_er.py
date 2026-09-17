@@ -96,6 +96,8 @@ def backtest_symbol(
         entry = float(nxt["Open"])
         if not np.isfinite(entry) or entry <= 0:
             continue
+        if entry < er.MIN_PRICE_FOR_PAPER:
+            continue
 
         target = er.reaction_target(entry, gap, rvol)
         if pd.isna(target):
