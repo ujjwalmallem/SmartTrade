@@ -34,8 +34,9 @@ and says nothing about whether a business is worth owning.
 Paper trading (`paper_trading/trade_er.py`) only opens *actionable*
 continuation: earnings-anchored upside gap, last complete session is the
 gap day or the next one, EntryScore (no look-ahead follow-through) at the
-Watch cutoff, and not Fighting the sector. Those are held up to
-FOLLOW_SESSIONS. Historical replay: python3 -m paper_trading.backtest_er
+Watch cutoff, not Fighting the sector, price >= $5. Hold is the *remaining*
+Fol3 window (3 sessions from the gap, not 3 from a late fill).
+Historical replay: python3 -m paper_trading.backtest_er
 
 Native usage:
     pip install -r requirements.txt
@@ -114,9 +115,14 @@ FOLLOW_SESSIONS = 3        # follow-through window after the gap day
 MAX_ACTIONABLE_AGE = 1
 ENTRY_SCORE_THRESHOLD = 3.5   # Watch cutoff, but using EntryScore (no Fol3)
 MIN_RVOL_FOR_PAPER = 1.8
+MIN_PRICE_FOR_PAPER = 5.0     # skip thin/penny prints
 HOLD_HORIZON_DAYS = FOLLOW_SESSIONS
 PAPER_SIGNAL = "ER_CONTINUATION"
 MARKET_CLOSE_ET = (16, 0)
+# Yahoo's daily bar is still a partial print at 16:00. Wait this long
+# after the bell before treating today as the last complete session.
+CLOSE_GRACE_MINUTES = 15
+INFO_PAUSE_SECONDS = 0.5      # .info is the flakiest Yahoo call per ticker
 
 CORE_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA",
@@ -142,6 +148,30 @@ SECTOR_ETF = {
     "Utilities": "XLU",
 }
 DEFAULT_ETF = "XLK"
+# Yahoo .info sector strings that are not exact GICS keys in SECTOR_ETF.
+SECTOR_ALIASES = {
+    "electronic technology": "Technology",
+    "technology services": "Technology",
+    "computer communications": "Technology",
+    "semiconductors": "Technology",
+    "semiconductor": "Technology",
+    "software": "Technology",
+    "internet software": "Technology",
+    "telecom": "Communication Services",
+    "telecommunications": "Communication Services",
+    "media": "Communication Services",
+    "retail": "Consumer Cyclical",
+    "automotive": "Consumer Cyclical",
+    "auto manufacturers": "Consumer Cyclical",
+    "banks": "Financial Services",
+    "capital markets": "Financial Services",
+    "biotech": "Healthcare",
+    "biotechnology": "Healthcare",
+    "pharma": "Healthcare",
+    "pharmaceuticals": "Healthcare",
+    "aerospace": "Industrials",
+    "machinery": "Industrials",
+}
 
 
 # ====================== DATA SHAPING ======================
@@ -193,7 +223,8 @@ def close_panel(raw, tickers):
 
 def last_complete_daily_frame(df, now=None):
     """Drop an in-progress RTH bar so gap / RVOL / follow are not baked from
-    a few minutes of today's prints. Same 4pm ET cutoff as gex_scanner."""
+    a few minutes of today's prints. Today's bar is complete only after
+    4:00 ET plus CLOSE_GRACE_MINUTES (Yahoo often has not finalized at 16:05)."""
     if df is None or df.empty:
         return df
     now_et = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="America/New_York")
@@ -207,8 +238,13 @@ def last_complete_daily_frame(df, now=None):
     else:
         last_day = last.tz_localize(None).normalize()
     today = now_et.tz_localize(None).normalize()
-    before_close = (now_et.hour, now_et.minute) < MARKET_CLOSE_ET
-    if last_day == today and before_close and len(df) >= 2:
+    complete_h = MARKET_CLOSE_ET[0]
+    complete_m = MARKET_CLOSE_ET[1] + CLOSE_GRACE_MINUTES
+    if complete_m >= 60:
+        complete_h += complete_m // 60
+        complete_m = complete_m % 60
+    before_complete = (now_et.hour, now_et.minute) < (complete_h, complete_m)
+    if last_day == today and before_complete and len(df) >= 2:
         return df.iloc[:-1]
     return df
 
@@ -382,12 +418,16 @@ def signed_gaps(df):
 
 
 def rvol_at(df, pos):
-    """Gap-day volume vs the RVOL_LOOKBACK sessions *before* it."""
+    """Gap-day volume vs the RVOL_LOOKBACK sessions *before* it.
+
+    Median baseline, not mean: one prior volume spike used to inflate the
+    denominator and hide a real print.
+    """
     start = max(0, pos - RVOL_LOOKBACK)
     base = df["Volume"].iloc[start:pos]
     if len(base) < 5:
         return np.nan
-    m = float(base.mean())
+    m = float(base.median())
     if m <= 0:
         return np.nan
     return float(df["Volume"].iloc[pos]) / m
@@ -403,20 +443,43 @@ def follow_at(df, pos, sessions=FOLLOW_SESSIONS):
 
 
 def pick_gap_in_window(gaps, last_er=None):
-    """Return (gap_date, gap, source). source is ER if last_er landed in range."""
+    """Return (gap_date, gap, source, alt_gaps).
+
+    When an ER date is in range, pick the session *closest* to that date
+    (not the largest |gap|). A +5% pre-drift two days earlier no longer
+    beats the actual ER print. alt_gaps lists the other window sessions
+    so the dashboard can flag a competing move. Without an ER date the
+    fallback is still largest |gap| (NO-ER).
+    """
     if gaps is None or gaps.empty:
-        return None, np.nan, "NO-DATA"
+        return None, np.nan, "NO-DATA", []
     source = "NO-ER"
     window = gaps
+    er_ts = None
     if last_er is not None:
-        lo = last_er - pd.Timedelta(days=ER_WINDOW_BEFORE + 2)   # +2 for weekends
-        hi = last_er + pd.Timedelta(days=ER_WINDOW_AFTER + 2)
+        er_ts = pd.Timestamp(last_er)
+        if er_ts.tzinfo is not None:
+            er_ts = er_ts.tz_convert(None)
+        er_ts = er_ts.normalize()
+        lo = er_ts - pd.Timedelta(days=ER_WINDOW_BEFORE + 2)   # +2 for weekends
+        hi = er_ts + pd.Timedelta(days=ER_WINDOW_AFTER + 2)
         w = gaps[(gaps.index >= lo) & (gaps.index <= hi)]
         if not w.empty:
             window = w
             source = "ER"
-    gap_date = window.abs().idxmax()
-    return gap_date, float(window.loc[gap_date]), source
+
+    if source == "ER" and er_ts is not None:
+        ranked = sorted(
+            window.index,
+            key=lambda d: (abs((pd.Timestamp(d).normalize() - er_ts).days),
+                           -abs(float(window.loc[d]))),
+        )
+        gap_date = ranked[0]
+        alts = [(d, float(window.loc[d])) for d in ranked[1:]]
+    else:
+        gap_date = window.abs().idxmax()
+        alts = [(d, float(window.loc[d])) for d in window.index if d != gap_date]
+    return gap_date, float(window.loc[gap_date]), source, alts
 
 
 def iter_er_events(df, earnings_dates):
@@ -425,6 +488,7 @@ def iter_er_events(df, earnings_dates):
     Used by the historical paper backtest so it shares the live window
     (ER_WINDOW_BEFORE/AFTER) and RVOL definition. Does not compute
     follow-through — that would leak the thing we are trying to predict.
+    RVOL is measured on df through the gap bar only (no later sessions).
     """
     if df is None or len(df) < RVOL_LOOKBACK + 2:
         return
@@ -432,24 +496,27 @@ def iter_er_events(df, earnings_dates):
     if gaps.empty:
         return
     seen = set()
-    for er in earnings_dates:
-        er_ts = pd.Timestamp(er)
+    for er_date in earnings_dates:
+        er_ts = pd.Timestamp(er_date)
         if er_ts.tzinfo is not None:
             er_ts = er_ts.tz_convert(None)
         er_ts = er_ts.normalize()
-        gap_date, gap, source = pick_gap_in_window(gaps, er_ts)
+        gap_date, gap, source, _alts = pick_gap_in_window(gaps, er_ts)
         if source != "ER" or gap_date is None or gap_date in seen:
             continue
         seen.add(gap_date)
         pos = df.index.get_loc(gap_date)
         if not isinstance(pos, (int, np.integer)):
             continue
+        pos = int(pos)
+        known = df.iloc[: pos + 1]
         yield {
             "er_date": er_ts,
             "gap_date": gap_date,
             "gap": float(gap),
-            "rvol": rvol_at(df, pos),
-            "pos": int(pos),
+            "rvol": rvol_at(known, pos),
+            "pos": pos,
+            "alt_gaps": _alts,
         }
 
 
@@ -465,7 +532,7 @@ def compute_reaction(df, last_er=None):
     blank = {
         "gap": np.nan, "rvol": np.nan, "follow": np.nan,
         "gap_date": None, "source": "NO-DATA", "last_close": np.nan,
-        "gap_age": np.nan,
+        "gap_age": np.nan, "alt_gaps": [],
     }
     if df is None or len(df) < RVOL_LOOKBACK + 2:
         if df is not None and len(df):
@@ -477,7 +544,7 @@ def compute_reaction(df, last_er=None):
         blank["last_close"] = float(df["Close"].iloc[-1])
         return blank
 
-    gap_date, gap, source = pick_gap_in_window(gaps, last_er)
+    gap_date, gap, source, alt_gaps = pick_gap_in_window(gaps, last_er)
     pos = df.index.get_loc(gap_date)
     if not isinstance(pos, (int, np.integer)):
         blank["last_close"] = float(df["Close"].iloc[-1])
@@ -485,12 +552,13 @@ def compute_reaction(df, last_er=None):
 
     return {
         "gap": gap,
-        "rvol": rvol_at(df, pos),
-        "follow": follow_at(df, pos),
+        "rvol": rvol_at(df, int(pos)),
+        "follow": follow_at(df, int(pos)),
         "gap_date": gap_date,
         "source": source,
         "last_close": float(df["Close"].iloc[-1]),
-        "gap_age": int(len(df) - 1 - pos),
+        "gap_age": gap_age_sessions(df, gap_date),
+        "alt_gaps": alt_gaps,
     }
 
 
@@ -614,6 +682,39 @@ def entry_score(gap, rvol, eps_surprise, rs_20d, sector_vs_bench,
     return round(r + f + si + s, 1)
 
 
+def hold_days_remaining(gap_age) -> int:
+    """Sessions left in the Fol3 window after entry.
+
+    Age 0 (gap is the last complete bar; fill is the next session): hold 3,
+    which lands on gap+FOLLOW_SESSIONS. Age 1 (one session late): hold 2.
+    Never hold a fixed 3 from a late fill — that would run 4 days post-gap.
+    """
+    if gap_age is None or (isinstance(gap_age, float) and pd.isna(gap_age)):
+        return FOLLOW_SESSIONS
+    return max(1, FOLLOW_SESSIONS - int(gap_age))
+
+
+def map_sector_etf(sector):
+    """(etf, flag). flag is None on an exact GICS hit, else a mapping note."""
+    if not sector:
+        return DEFAULT_ETF, "no-sector"
+    if sector in SECTOR_ETF:
+        return SECTOR_ETF[sector], None
+    s = str(sector).strip().lower()
+    lowered = {k.lower(): (k, etf) for k, etf in SECTOR_ETF.items()}
+    if s in lowered:
+        _key, etf = lowered[s]
+        return etf, None
+    for key, etf in SECTOR_ETF.items():
+        kl = key.lower()
+        if kl in s or s in kl:
+            return etf, f"sector-map:{sector}->{key}"
+    for alias, key in SECTOR_ALIASES.items():
+        if alias in s:
+            return SECTOR_ETF[key], f"sector-map:{sector}->{key}"
+    return DEFAULT_ETF, f"sector-default:{sector}"
+
+
 def is_paper_candidate(row) -> bool:
     """True when a dashboard row is a fresh upside continuation to paper-trade."""
     src = row.get("Src") if hasattr(row, "get") else row["Src"]
@@ -636,6 +737,9 @@ def is_paper_candidate(row) -> bool:
         return False
     score = row.get("EntryScore") if hasattr(row, "get") else row["EntryScore"]
     if pd.isna(score) or score < ENTRY_SCORE_THRESHOLD:
+        return False
+    price = row.get("Price") if hasattr(row, "get") else row["Price"]
+    if pd.isna(price) or price < MIN_PRICE_FOR_PAPER:
         return False
     return True
 
@@ -660,7 +764,7 @@ def convergence_label(r_score, s_score):
 
 # ====================== MAIN ======================
 def build_dashboard(tickers=CORE_TICKERS, after_hours_focus=AFTER_HOURS_FOCUS,
-                    pause=0.15):
+                    pause=INFO_PAUSE_SECONDS):
     etfs = sorted(set(SECTOR_ETF.values()) | {DEFAULT_ETF})
     universe = sorted(set(tickers) | set(etfs) | {BENCHMARK})
 
@@ -716,9 +820,16 @@ def build_dashboard(tickers=CORE_TICKERS, after_hours_focus=AFTER_HOURS_FOCUS,
             flags.append("fresh")   # gap is the latest bar; no follow-through yet
         elif pd.notna(gap_age) and 0 < gap_age < FOLLOW_SESSIONS:
             flags.append("partial-follow")
+        for alt_date, alt_gap in (reaction.get("alt_gaps") or [])[:2]:
+            if abs(alt_gap) >= 3:
+                flags.append(
+                    f"alt-gap:{pd.Timestamp(alt_date).strftime('%m-%d')} {alt_gap:+.1f}%"
+                )
 
         sector = info["sector"]
-        etf = SECTOR_ETF.get(sector, DEFAULT_ETF)
+        etf, sector_flag = map_sector_etf(sector)
+        if sector_flag:
+            flags.append(sector_flag)
         rs = rel_strength(px, ticker, etf)
         if pd.isna(rs["rs_20d"]):
             flags.append("no-rs")
@@ -854,7 +965,7 @@ def report(df):
     print("Fol3%       = close-to-close move over the 3 sessions after the gap")
     print("EntryScore  = Watch/STRONG gate *without* Fol3 (no look-ahead)")
     print("GapAge      = complete sessions after the gap day (0 = fresh)")
-    print("Actionable  = ER upside, GapAge<=1, EntryScore>=3.5, RVOL>=1.8, not Fighting")
+    print("Actionable  = ER upside, GapAge<=1, EntryScore>=3.5, RVOL>=1.8, px>=$5, not Fighting")
     print("Aligned+    = strong reaction inside a leading sector")
     print("Supportive  = decent reaction with a sector tailwind")
     print("Fighting    = strong reaction, lagging sector (higher fade risk)")
