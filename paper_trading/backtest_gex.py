@@ -1,7 +1,7 @@
 """
 Historical same-day paper backtest of GEX directional signals.
 
-Yahoo (and Stooq) do not publish historical option chains, so dealer GEX,
+Yahoo (and Stooq) do not publish historical option chains, so customer GEX,
 call/put walls, and the gamma flip cannot be reconstructed after the fact.
 This backtest therefore only asks two honest questions:
 
@@ -17,8 +17,21 @@ This backtest therefore only asks two honest questions:
 Stops/targets use classify_setup's no-wall fallbacks (long 2%/4%, short
 3%/5%), which is what a live scan uses when it cannot locate a wall.
 
-Signal is taken on day t's close; the paper fill is day t+1's open; the
-exit is simulated from day t+1's OHLC (see paper_trading.evaluate).
+Signal is taken on day t's last complete bar (same helper the live scanner
+uses, with historical `now` at 16:20 ET so later bars in the series cannot
+leak into RSI/EMA/ATR). The paper fill is day t+1's open; the exit is
+simulated from day t+1's OHLC (see paper_trading.evaluate).
+
+Lookahead notes (what this does and does not see):
+- EMA/RSI/ATR are causal ewm on split-adjusted OHLC. last_complete_daily_row
+  clips any bar after the as-of date, matching live 9:31 vs EOD behavior.
+- Yahoo does not publish historical option chains, so walls/GEX/flip are
+  never reconstructed from a future chain. Stops use the no-wall fallback.
+- Fill re-checks the signal at t+1 open against day-t RSI/EMA (no future
+  technicals). OVERSOLD is held up to 5 sessions; bear is same-day.
+- `trade_gex` paper opens from the live scan (spot + last complete daily).
+  `check`/`close` mark to the live quote. `score` is an ex-post grade of
+  stored scans against that session's OHLC, not a trading signal.
 
 Usage:
     python3 -m paper_trading.backtest_gex
@@ -76,7 +89,7 @@ def load_history(symbols: List[str]) -> Dict[str, pd.DataFrame]:
         raw = yf.download(
             symbols,
             period=HISTORY_PERIOD,
-            auto_adjust=False,
+            auto_adjust=True,
             group_by="ticker",
             threads=True,
             progress=False,
@@ -161,9 +174,20 @@ def backtest_symbol(
             continue
         row = df.iloc[i]
         nxt = df.iloc[i + 1]
-        rsi = row.get("RSI", np.nan)
-        ema = row.get("EMA_200", np.nan)
-        close = float(row["Close"])
+        bar_ts = pd.Timestamp(df.index[i])
+        if bar_ts.tzinfo is None:
+            as_of = bar_ts.tz_localize("America/New_York")
+        else:
+            as_of = bar_ts.tz_convert("America/New_York")
+        as_of = as_of.normalize() + pd.Timedelta(hours=16, minutes=20)
+        try:
+            latest = gex.last_complete_daily_row(df, now=as_of)
+        except ValueError:
+            latest = row
+        rsi = latest.get("RSI", np.nan)
+        ema = latest.get("EMA_200", np.nan)
+        close = float(latest["Close"])
+        atr = latest.get("ATR", np.nan)
         if not np.isfinite(rsi) or not np.isfinite(ema) or close <= 0:
             continue
         if require_rsi_rising:
@@ -177,7 +201,7 @@ def backtest_symbol(
 
         classified = gex.classify_setup(
             close, float(rsi), float(ema),
-            "NO_GEX", np.nan, np.nan, np.nan,
+            "NO_GEX", np.nan, np.nan, np.nan, atr=atr,
         )
         signal = classified["signal"]
         gex_filter = "not_required"
@@ -186,7 +210,7 @@ def backtest_symbol(
             if rsi < 40 and close < ema:
                 classified = gex.classify_setup(
                     close, float(rsi), float(ema),
-                    "NEGATIVE_GEX", np.nan, ema, np.nan,
+                    "NEGATIVE_GEX", np.nan, ema, np.nan, atr=atr,
                 )
                 signal = classified["signal"]
                 gex_filter = "skipped_unavailable"
@@ -209,7 +233,7 @@ def backtest_symbol(
         fill_regime = "NEGATIVE_GEX" if direction == "SHORT" else "NO_GEX"
         filled = gex.classify_setup(
             entry, float(rsi), float(ema),
-            fill_regime, np.nan, np.nan, np.nan,
+            fill_regime, np.nan, np.nan, np.nan, atr=atr,
         )
         if filled["signal"] != signal:
             continue
@@ -291,6 +315,8 @@ Caveats (read before treating these numbers as an edge):
   will over-fire vs production (live also needs NEGATIVE_GEX).
 - Stops/targets are the no-wall clamp fallbacks, not live wall-anchored
   levels, so paper P&L is not the options-spread P&L the scanner names.
+- Split-adjusted daily bars (auto_adjust=True). Unadjusted prints gap on
+  splits and jump EMA200; live RSI/EMA use the same adjusted series.
 - OVERSOLD is held up to 5 sessions (stop/target/TIME); bear is same-day.
   Consecutive signals on a name already in a trade are skipped.
 - Daily OHLC cannot sequence stop vs target; days where both sit in range
