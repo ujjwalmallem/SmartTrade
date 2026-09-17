@@ -8,8 +8,9 @@ sector. That is a stricter, fresher subset than "Final >= 3.5", which
 was re-opening last-quarter winners whose follow-through was already in
 the score.
 
-Hold is FOLLOW_SESSIONS (the dashboard's own Fol3 window), not same-day
-EOD. Stop is the native reaction_stop (half the gap, 2–6%), not a flat 3%.
+Hold is the remaining Fol3 window after the gap (age 0 -> 3 sessions,
+age 1 -> 2), not a fixed 3 from a late fill. Stop is the native
+reaction_stop (half the gap, 2–6%), not a flat 3%.
 
 Usage:
     python3 -m paper_trading.trade_er open
@@ -54,6 +55,7 @@ def _scan_setups(df) -> pd.DataFrame:
             "gap": r.get("Gap%"),
             "rvol": r.get("RVOL"),
             "gap_age": r.get("GapAge"),
+            "hold_days": er.hold_days_remaining(r.get("GapAge")),
             "actionable": bool(r.get("Actionable")),
             "src": r.get("Src"),
             "conv": r.get("Conv"),
@@ -79,6 +81,8 @@ def format_open_push(opened, df) -> tuple:
                 why.append(f"Entry {r.get('EntryScore')}")
             if pd.isna(r.get("RVOL")) or r["RVOL"] < er.MIN_RVOL_FOR_PAPER:
                 why.append("low RVOL")
+            if pd.isna(r.get("Price")) or r["Price"] < er.MIN_PRICE_FOR_PAPER:
+                why.append("px")
             skipped.append(f"{r['Ticker']}" + (f" ({', '.join(why)})" if why else " (stale)"))
 
     if opened:
@@ -111,10 +115,11 @@ def do_open():
         stop = row["Stop"]
         if pd.isna(stop):
             stop = er.reaction_stop(row["Price"], row["Gap%"])
+        hold_days = er.hold_days_remaining(row.get("GapAge"))
         pos = common.open_position(
             ledger, row["Ticker"], "LONG", row["Price"],
             stop, row["React Tgt"], er.PAPER_SIGNAL,
-            hold_days=HOLD_DAYS,
+            hold_days=hold_days,
         )
         if pos:
             opened.append(pos)
@@ -286,8 +291,9 @@ def do_score():
             if future.empty:
                 missing += 1
                 continue
+            hold = int(row.get("hold_days") or er.hold_days_remaining(row.get("gap_age")))
             hold_bars = []
-            for ts, bar in future.head(HOLD_DAYS).iterrows():
+            for ts, bar in future.head(hold).iterrows():
                 hold_bars.append((
                     pd.Timestamp(ts).strftime("%Y-%m-%d"),
                     float(bar["Open"]), float(bar["High"]),
@@ -296,7 +302,7 @@ def do_score():
             first = hold_bars[0]
             scores.append(evaluate.score_setup_row(
                 row, first[1], first[2], first[3], first[4],
-                hold_bars=hold_bars, max_days=HOLD_DAYS,
+                hold_bars=hold_bars, max_days=hold,
             ))
 
     by_signal = evaluate.summarize_scan_scores(scores)
