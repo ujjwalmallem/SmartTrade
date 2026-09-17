@@ -1,0 +1,6 @@
+Ticker,Src,Gap%,RVOL,Fol3%,EntryScore,Final,GapAge,Price,Stop,React Tgt,Conv,Actionable,Flags
+AAPL,ER,4.5,3.2,,4.0,4.0,0,192.40,186.63,196.25,,True,fresh
+MSFT,ER,6.1,2.4,1.2,3.7,4.4,1,415.10,402.64,425.05,Supportive,True,partial-follow
+NVDA,ER,9.8,4.1,,5.0,5.0,0,128.50,120.79,134.80,Aligned+,True,fresh
+KO,NO-ER,2.1,1.1,,1.0,1.0,12,62.30,61.06,,,"False","NO-ER"
+AMD,ER,-7.4,3.0,,0.0,-1.5,0,148.20,,,"",False,fresh

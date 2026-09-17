@@ -1,0 +1,6 @@
+symbol,signal,rank_score,base_score,price,rsi,gex_1pct_m,gex_bps,call_wall,put_wall,gamma_flip,call_wall_edge,put_wall_edge,stop_loss,target_price,hold_horizon,has_earnings_data,recommended_strategy
+AMAT,OVERSOLD_BULL_PULLBACK,88.2,85.0,427.98,32.1,412.4,1.82,445.0,410.0,420.5,False,False,419.42,445.10,5,True,Bull Put Spread $410.0/$400.0
+NVDA,VOLATILITY_EXPANSION_BEAR,79.4,78.0,178.40,36.4,-220.1,-0.91,190.0,165.0,182.0,False,False,183.75,169.48,1,True,Bear Put Debit Spread $175.0/$165.0
+AAPL,WALL_PIN,44.5,40.0,228.10,55.0,880.2,2.10,230.0,215.0,224.0,False,False,235.00,229.24,1,True,Iron Condor / Short Volatility
+MSFT,DAMPENED_BULL_TREND,30.0,30.0,415.00,58.2,610.0,1.40,430.0,400.0,410.0,False,False,402.55,423.30,1,True,Covered Calls / Cash-Secured Puts
+KO,OVERSOLD_BULL_PULLBACK,42.0,84.0,62.40,31.5,55.1,,65.0,60.0,61.8,False,True,61.15,64.90,5,False,CONFIRM EARNINGS — Bull Put Spread $60.0/$50.0 [WALL_EDGE put]
