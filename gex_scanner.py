@@ -8,9 +8,11 @@ Native usage:
     pip install yfinance numpy pandas scipy
     python3 gex_scanner.py
 
-NOTE: Signal thresholds, tier base scores, and the GEX bonus weight are
-hand-set, not fitted. A paper loop lives in paper_trading/: oversold is
-held up to 5 sessions, other directional setups are same-day.
+NOTE: Signal thresholds, tier base scores, and the GEX bonus weight live in
+config/gex_params.yaml (defaults match current live behavior). They are
+hand-set, not fitted — never auto-promote optimizer output. A paper loop
+lives in paper_trading/: oversold is held up to 5 sessions, other
+directional setups are same-day.
 python3 -m paper_trading.backtest_gex replays the price-only half of
 those rules against daily OHLC. Neither is a walk-forward-validated
 edge -- treat the ranking as a triage view.
@@ -54,6 +56,8 @@ import requests
 import yfinance as yf
 from scipy.stats import norm
 from typing import Dict, Tuple, List, Union
+
+from gex_params import load_gex_params, hold_horizon_days
 
 
 def notify_ntfy(title: str, message: str, tags: str = "") -> None:
@@ -569,12 +573,14 @@ def calculate_gex_and_walls(symbol: str, r: float = 0.045) -> Tuple[float, float
         chain['impliedVolatility'] = pd.to_numeric(chain['impliedVolatility'], errors='coerce').fillna(0)
         chain['strike'] = pd.to_numeric(chain['strike'], errors='coerce').fillna(0)
 
+        wall_cfg = load_gex_params()["walls"]
+        min_oi = int(wall_cfg.get("min_oi", 5))
         min_strike = curr_price * 0.70
         max_strike = curr_price * 1.30
         valid_chain = chain[
             (chain['strike'] >= min_strike) &
             (chain['strike'] <= max_strike) &
-            (chain['openInterest'] >= 5) &
+            (chain['openInterest'] >= min_oi) &
             (chain['impliedVolatility'] > 0.001)
         ].copy()
 
@@ -617,7 +623,7 @@ def calculate_gex_and_walls(symbol: str, r: float = 0.045) -> Tuple[float, float
         # wall lands on the band edge -- that is the constraint binding, not a real
         # cluster. Widening WALL_MAX_DIST re-admits the lottery strikes. There is no
         # correct value; treat a wall within one strike of the edge with suspicion.
-        WALL_MAX_DIST = WALL_MAX_DIST_DEFAULT
+        WALL_MAX_DIST = float(wall_cfg.get("max_dist", WALL_MAX_DIST_DEFAULT))
 
         call_wall, put_wall = select_oi_walls(valid_chain, curr_price, WALL_MAX_DIST)
 
@@ -923,15 +929,13 @@ def _empty_row(symbol: str, signal: str, strategy: str, score: float,
 # Sessions the paper loop (and the backtest) will hold a directional proxy.
 # OVERSOLD is a swing: same-day paper P&L was a coin flip, while 1d/5d
 # hold-to-close was positive on the watchlist. Everything else stays same-day.
-HOLD_HORIZON_DAYS = {
-    "OVERSOLD_BULL_PULLBACK": 5,
-    "VOLATILITY_EXPANSION_BEAR": 1,
-    "RESISTANCE_PINNED_SHORT_VOL": 1,
-    "WALL_PIN": 1,
-    "DAMPENED_BULL_TREND": 1,
-    "HIGH_VOLATILITY_DANGER_ZONE": 1,
-    "NO_GEX_REGIME": 0,
-}
+# Values come from config/gex_params.yaml; classify_setup re-reads so a
+# grid search can change holds without restarting the process.
+def _hold_horizon_days():
+    return hold_horizon_days(load_gex_params())
+
+
+HOLD_HORIZON_DAYS = _hold_horizon_days()  # refreshed on import; reload via load_gex_params(force_reload=True)
 
 
 def classify_setup(
@@ -953,25 +957,33 @@ def classify_setup(
     fire (they don't need a regime), and anything leftover is NO_GEX_REGIME
     so a historical backtest doesn't pretend it saw customer gamma.
     """
+    cfg = load_gex_params()
+    os_cfg = cfg["oversold"]
+    bear_cfg = cfg["bear"]
+    res_cfg = cfg["resistance"]
+    wp_cfg = cfg["wall_pin"]
+    band = cfg["wall_band"]
+
     at_call_wall_band = (
         not np.isnan(call_wall) and
-        (curr_price >= call_wall * 0.985) and
-        (curr_price <= call_wall * 1.020)
+        (curr_price >= call_wall * (1.0 - band["below"])) and
+        (curr_price <= call_wall * (1.0 + band["above"]))
     )
     width_steps = spread_width_steps(curr_price, atr)
+    holds = hold_horizon_days(cfg)
 
-    if rsi < 35 and curr_price >= ema200:
+    if rsi < os_cfg["rsi_max"] and curr_price >= ema200:
         signal = "OVERSOLD_BULL_PULLBACK"
-        base_score = 80.0 + min(35.0 - rsi, 10.0)
+        base_score = os_cfg["base_score"] + min(os_cfg["rsi_max"] - rsi, os_cfg["rsi_bonus_cap"])
         sell_st, buy_st = build_spread_strikes(curr_price, put_wall, "BULL_PUT", width_steps)
         strat = f"Bull Put Spread ${sell_st:.1f}/${buy_st:.1f}"
         stop_loss = clamp_below(put_wall * 0.98 if not np.isnan(put_wall) else np.nan,
                                 curr_price, near=0.02, far=0.08, atr=atr)
         target_price = clamp_above(np.nan, curr_price, near=0.04, far=0.04, atr=atr)
 
-    elif at_call_wall_band and rsi > 68:
+    elif at_call_wall_band and rsi > res_cfg["rsi_min"]:
         signal = "RESISTANCE_PINNED_SHORT_VOL"
-        base_score = 60.0 + min(rsi - 68.0, 10.0)
+        base_score = res_cfg["base_score"] + min(rsi - res_cfg["rsi_min"], res_cfg["rsi_bonus_cap"])
         sell_st, buy_st = build_spread_strikes(curr_price, call_wall, "BEAR_CALL", width_steps)
         strat = f"Bear Call Spread ${sell_st:.1f}/${buy_st:.1f}"
         stop_loss = clamp_above(call_wall * 1.02 if not np.isnan(call_wall) else np.nan,
@@ -980,7 +992,7 @@ def classify_setup(
 
     elif at_call_wall_band:
         signal = "WALL_PIN"
-        base_score = 40.0
+        base_score = float(wp_cfg["base_score"])
         strat = "Iron Condor / Short Volatility"
         # Upside breach only; a condor's downside leg needs its own level if traded
         stop_loss = clamp_above(call_wall * 1.02 if not np.isnan(call_wall) else np.nan,
@@ -995,9 +1007,11 @@ def classify_setup(
         target_price = clamp_above(call_wall, curr_price, near=0.02, far=0.10, atr=atr)
 
     elif regime == "NEGATIVE_GEX":
-        if rsi < 40 and curr_price < ema200:
+        if rsi < bear_cfg["rsi_max"] and curr_price < ema200:
             signal = "VOLATILITY_EXPANSION_BEAR"
-            base_score = 75.0 + min(40.0 - rsi, 10.0)
+            base_score = bear_cfg["base_score"] + min(
+                bear_cfg["rsi_max"] - rsi, bear_cfg["rsi_bonus_cap"]
+            )
             buy_st, sell_st = build_spread_strikes(curr_price, put_wall, "BEAR_PUT", width_steps)
             strat = f"Bear Put Debit Spread ${buy_st:.1f}/${sell_st:.1f}"
             ref_stop = gamma_flip if not np.isnan(gamma_flip) else ema200
@@ -1025,13 +1039,14 @@ def classify_setup(
         "recommended_strategy": strat,
         "stop_loss": float(stop_loss) if not np.isnan(stop_loss) else np.nan,
         "target_price": float(target_price) if not np.isnan(target_price) else np.nan,
-        "hold_horizon": HOLD_HORIZON_DAYS.get(signal),
+        "hold_horizon": holds.get(signal),
     }
 
 
 def calculate_equity_signal(symbol: str) -> Dict:
     # Earnings check first: cheapest guard, avoids chain fetches on blackout names
-    earnings_status = cache.check_earnings_status(symbol, days_threshold=7)
+    days = int(load_gex_params()["earnings_blackout_days"])
+    earnings_status = cache.check_earnings_status(symbol, days_threshold=days)
 
     if earnings_status is True:
         curr_price = cache.get_spot_price(symbol)
@@ -1072,14 +1087,15 @@ def calculate_equity_signal(symbol: str) -> Dict:
     atr = latest.get('ATR', np.nan)
 
     if np.isnan(rsi) or np.isnan(ema200):
+        wall_dist = float(load_gex_params()["walls"].get("max_dist", WALL_MAX_DIST_DEFAULT))
         return _empty_row(
             symbol, "NO_DATA", "Missing Technical Indicators", -999.0,
             earnings_status != "UNKNOWN",
             price=round(float(curr_price), 2),
             gex_1pct_m=gex_1pct_m, gex_bps=gex_bps,
             call_wall=call_wall, put_wall=put_wall, gamma_flip=gamma_flip,
-            call_wall_edge=wall_at_band_edge(call_wall, curr_price, "call"),
-            put_wall_edge=wall_at_band_edge(put_wall, curr_price, "put"),
+            call_wall_edge=wall_at_band_edge(call_wall, curr_price, "call", max_dist=wall_dist),
+            put_wall_edge=wall_at_band_edge(put_wall, curr_price, "put", max_dist=wall_dist),
         )
 
     classified = classify_setup(
@@ -1099,8 +1115,9 @@ def calculate_equity_signal(symbol: str) -> Dict:
     else:
         strat = classified["recommended_strategy"]
 
-    call_edge = wall_at_band_edge(call_wall, curr_price, "call")
-    put_edge = wall_at_band_edge(put_wall, curr_price, "put")
+    wall_dist = float(load_gex_params()["walls"].get("max_dist", WALL_MAX_DIST_DEFAULT))
+    call_edge = wall_at_band_edge(call_wall, curr_price, "call", max_dist=wall_dist)
+    put_edge = wall_at_band_edge(put_wall, curr_price, "put", max_dist=wall_dist)
     if call_edge or put_edge:
         edge_bits = []
         if call_edge:
@@ -1222,7 +1239,8 @@ def generate_top_trades(symbols_list: List[str]) -> Tuple[pd.DataFrame, pd.DataF
             print(f"[WARN] Market cap unavailable for {n_rows - n_finite}/{n_rows} ranked "
                   f"tickers; GEX ranking term is weak or inactive this scan.")
 
-        df_setups['rank_score'] = (df_setups['base_score'] + df_setups['gex_pct'] * 9.0).round(2)
+        gex_weight = float(load_gex_params()["ranking"]["gex_weight"])
+        df_setups['rank_score'] = (df_setups['base_score'] + df_setups['gex_pct'] * gex_weight).round(2)
         df_setups = df_setups.sort_values(by="rank_score", ascending=False).reset_index(drop=True)
 
     df_residual = pd.DataFrame(residual)

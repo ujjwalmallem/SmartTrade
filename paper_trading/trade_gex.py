@@ -37,6 +37,7 @@ import yfinance as yf
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gex_scanner as gex
+from gex_params import load_gex_params, hold_horizon_days
 from paper_trading import common, evaluate
 
 LEDGER_PATH = str(Path(__file__).resolve().parent / "ledger_gex.json")
@@ -45,6 +46,21 @@ DIRECTION_MAP = {
     "OVERSOLD_BULL_PULLBACK": "LONG",
     "VOLATILITY_EXPANSION_BEAR": "SHORT",
 }
+
+
+def _apply_paper_cfg():
+    """Refresh paper gates from config/gex_params.yaml (or optimizer cache)."""
+    global MAX_NEW_POSITIONS, HOLD_DAYS
+    cfg = load_gex_params()
+    MAX_NEW_POSITIONS = int(cfg["ranking"]["max_new_positions"])
+    holds = hold_horizon_days(cfg)
+    HOLD_DAYS = {
+        "OVERSOLD_BULL_PULLBACK": holds["OVERSOLD_BULL_PULLBACK"],
+        "VOLATILITY_EXPANSION_BEAR": holds["VOLATILITY_EXPANSION_BEAR"],
+    }
+    return cfg
+
+
 MAX_NEW_POSITIONS = 5
 # Same-day paper P&L on OVERSOLD was a coin flip; 1d/5d hold-to-close was
 # positive. Bear 5d was negative, so it stays a same-day trade.
@@ -52,6 +68,7 @@ HOLD_DAYS = {
     "OVERSOLD_BULL_PULLBACK": gex.HOLD_HORIZON_DAYS["OVERSOLD_BULL_PULLBACK"],
     "VOLATILITY_EXPANSION_BEAR": gex.HOLD_HORIZON_DAYS["VOLATILITY_EXPANSION_BEAR"],
 }
+_apply_paper_cfg()
 
 
 def format_open_push(opened, df_setups) -> tuple:
@@ -83,6 +100,14 @@ def format_open_push(opened, df_setups) -> tuple:
 
 
 def do_open():
+    cfg = _apply_paper_cfg()
+    filt = cfg.get("filters") or {}
+    rank_cfg = cfg.get("ranking") or {}
+    require_earnings = bool(filt.get("require_earnings_data", True))
+    skip_wall_edge = bool(filt.get("skip_wall_edge", False))
+    min_abs_gex = float(filt.get("min_abs_gex_bps") or 0.0)
+    min_rank = float(rank_cfg.get("min_rank_for_live") or 0.0)
+
     ledger = common.load_ledger(LEDGER_PATH)
     df_setups, df_residual, df_avoid = gex.generate_top_trades(gex.WATCHLIST)
     common.record_scan(ledger, common.today_str(), df_setups, df_residual, df_avoid)
@@ -91,8 +116,19 @@ def do_open():
     if not df_setups.empty:
         candidates = df_setups[df_setups["signal"].isin(DIRECTION_MAP)].head(MAX_NEW_POSITIONS)
         for _, row in candidates.iterrows():
-            if row.get("has_earnings_data") is False:
+            if require_earnings and row.get("has_earnings_data") is False:
                 print(f"[paper-gex] skip {row['symbol']}: earnings calendar unconfirmed")
+                continue
+            if skip_wall_edge and (row.get("call_wall_edge") or row.get("put_wall_edge")):
+                print(f"[paper-gex] skip {row['symbol']}: wall at band edge")
+                continue
+            gex_bps = row.get("gex_bps")
+            if min_abs_gex > 0 and pd.notna(gex_bps) and abs(float(gex_bps)) < min_abs_gex:
+                print(f"[paper-gex] skip {row['symbol']}: |gex_bps| < {min_abs_gex}")
+                continue
+            rank_score = row.get("rank_score")
+            if min_rank > 0 and pd.notna(rank_score) and float(rank_score) < min_rank:
+                print(f"[paper-gex] skip {row['symbol']}: rank_score {rank_score} < {min_rank}")
                 continue
             pos = common.open_position(
                 ledger, row["symbol"], DIRECTION_MAP[row["signal"]], row["price"],

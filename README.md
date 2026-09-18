@@ -31,7 +31,10 @@ python3 -m paper_trading.trade_er open
 python3 -m paper_trading.backtest_gex
 python3 -m paper_trading.backtest_er
 
-python3 -m unittest tests.test_paper_trading tests.test_gex_walls tests.test_er_gap -q
+python3 -m paper_trading.optimize_gex --oversold-only   # price-side grid; does not write live yaml
+python3 -m paper_trading.log_gex_results snapshot       # intended for results/gex branch
+
+python3 -m unittest tests.test_paper_trading tests.test_gex_walls tests.test_er_gap tests.test_gex_params -q
 ```
 
 Local wrappers: `./run_gex_scan.sh`, `./run_er_scan.sh`. Watchlists: `WATCHLIST` in `gex_scanner.py`, `CORE_TICKERS` in `er_dashboard.py`.

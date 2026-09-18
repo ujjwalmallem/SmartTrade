@@ -48,3 +48,34 @@ jobs:
 
       - name: Run paper trading
         run: bash run_paper_trading.sh gex ${{ steps.action.outputs.action }}
+
+      # GITHUB_TOKEN cannot reliably dispatch another workflow. After open/close,
+      # overlay the develop ledger onto results/gex and append the journal there.
+      - name: Log snapshot/outcomes on results/gex
+        if: steps.action.outputs.action == 'open' || steps.action.outputs.action == 'close'
+        run: |
+          set -euo pipefail
+          ACTION="${{ steps.action.outputs.action }}"
+          if [ "$ACTION" = "open" ]; then
+            LOG_CMD=snapshot
+          else
+            LOG_CMD=outcomes
+          fi
+
+          git fetch origin results/gex:results/gex
+          git worktree add /tmp/gex-results results/gex
+          mkdir -p /tmp/gex-results/results/gex/scans /tmp/gex-results/results/gex/reports
+          export GEX_RESULTS_DIR=/tmp/gex-results/results/gex
+          export GEX_LEDGER_PATH="$PWD/paper_trading/ledger_gex.json"
+          python3 -m paper_trading.log_gex_results "$LOG_CMD"
+
+          git -C /tmp/gex-results config user.name "gex-results-bot"
+          git -C /tmp/gex-results config user.email "bot@users.noreply.github.com"
+          git -C /tmp/gex-results add results/gex/scans results/gex/journal.csv || true
+          if git -C /tmp/gex-results diff --staged --quiet; then
+            echo "No results/gex changes"
+          else
+            git -C /tmp/gex-results commit -m "gex results: ${LOG_CMD} $(date -u +%Y-%m-%dT%H%MZ)"
+            git -C /tmp/gex-results push origin results/gex
+          fi
+          git worktree remove /tmp/gex-results --force

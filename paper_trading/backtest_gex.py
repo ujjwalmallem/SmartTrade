@@ -54,11 +54,11 @@ import yfinance as yf
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gex_scanner as gex
+from gex_params import load_gex_params
 from paper_trading import evaluate
 
 RESULTS_PATH = Path(__file__).resolve().parent / "backtest_gex_results.json"
 SUMMARY_PATH = Path(__file__).resolve().parent / "backtest_gex_summary.json"
-EARNINGS_BLACKOUT_DAYS = 7
 MIN_BARS = 200
 # EMA200 / RSI need a filled-in window; skip this many sessions from the
 # start of the downloaded series before emitting trades.
@@ -138,12 +138,18 @@ def load_earnings_dates(symbol: str) -> Set[pd.Timestamp]:
     return {pd.Timestamp(ts).tz_localize(None).normalize() for ts in idx}
 
 
-def in_earnings_blackout(signal_day: pd.Timestamp, earnings: Set[pd.Timestamp]) -> bool:
-    """Match live scanner: 0 <= (earnings - today) <= 7 calendar days."""
+def in_earnings_blackout(
+    signal_day: pd.Timestamp,
+    earnings: Set[pd.Timestamp],
+    days: Optional[int] = None,
+) -> bool:
+    """Match live scanner: 0 <= (earnings - today) <= N calendar days."""
+    if days is None:
+        days = int(load_gex_params()["earnings_blackout_days"])
     day = pd.Timestamp(signal_day).tz_localize(None).normalize()
     for ed in earnings:
         delta = (ed - day).days
-        if 0 <= delta <= EARNINGS_BLACKOUT_DAYS:
+        if 0 <= delta <= int(days):
             return True
     return False
 
@@ -207,7 +213,8 @@ def backtest_symbol(
         gex_filter = "not_required"
 
         if signal != "OVERSOLD_BULL_PULLBACK" and include_bear_proxy:
-            if rsi < 40 and close < ema:
+            bear_rsi_max = float(load_gex_params()["bear"]["rsi_max"])
+            if rsi < bear_rsi_max and close < ema:
                 classified = gex.classify_setup(
                     close, float(rsi), float(ema),
                     "NEGATIVE_GEX", np.nan, ema, np.nan, atr=atr,

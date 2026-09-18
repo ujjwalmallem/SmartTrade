@@ -4,3 +4,5 @@ venv/
 gex_scan.log
 paper_trading/backtest_gex_results.json
 paper_trading/backtest_er_results.json
+config/gex_params.suggested.yaml
+results/
