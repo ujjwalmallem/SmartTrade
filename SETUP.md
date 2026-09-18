@@ -134,8 +134,28 @@ choose `open`/`check`/`close`. The ER *dashboard* scan itself is 4:45 PM ET
 (`.github/workflows/daily-er-scan.yml`); paper opens the next morning so the fill
 is the first session after the gap.
 
-Position sizing and hold lengths are hand-set constants in `trade_gex.py` /
-`er_dashboard.py` — edit them directly if you want different values.
+Position sizing and hold lengths are hand-set in `config/gex_params.yaml`
+(loaded by `gex_params.py`) — paper `trade_gex.py` re-reads them on each open.
+Do not auto-promote `config/gex_params.suggested.yaml` from the optimizer.
+
+### GEX params search and results log
+
+```bash
+# Price-side grid (OVERSOLD exact; BEAR is a proxy). Writes a JSON report
+# under results/gex/reports/ (gitignored on develop). --write-best emits
+# config/gex_params.suggested.yaml — copy fields into gex_params.yaml only
+# after inspecting trade count, PF, and hold-out.
+python3 -m paper_trading.optimize_gex --oversold-only --write-best
+
+# Append today's scan / closed trades (intended for the results/gex branch)
+python3 -m paper_trading.log_gex_results snapshot
+python3 -m paper_trading.log_gex_results outcomes
+```
+
+Paper GEX `open`/`close` on GitHub Actions also appends to the `results/gex`
+branch (journal + daily scan JSON). Manual replay: Actions → **GEX results log**.
+That workflow's trigger file must land on `main` to show up in the UI; code
+still runs from `develop`.
 
 ### Are the GEX signals right?
 
