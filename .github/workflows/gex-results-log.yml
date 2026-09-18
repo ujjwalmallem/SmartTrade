@@ -1,0 +1,75 @@
+name: GEX results log
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: snapshot or outcomes
+        type: choice
+        options: [snapshot, outcomes]
+        default: snapshot
+  repository_dispatch:
+    types: [gex-results-log]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gex-results-log
+  cancel-in-progress: false
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout results branch
+        uses: actions/checkout@v4
+        with:
+          ref: results/gex
+          fetch-depth: 0
+
+      - name: Fetch develop (code + ledger)
+        run: |
+          git fetch origin develop:develop
+          git checkout develop -- paper_trading/ledger_gex.json \
+            paper_trading/log_gex_results.py \
+            paper_trading/common.py \
+            gex_scanner.py gex_params.py config/gex_params.yaml \
+            requirements.txt || true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Determine action
+        id: act
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "action=${{ github.event.inputs.action }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "action=${{ github.event.client_payload.action || 'snapshot' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run logger
+        run: python3 -m paper_trading.log_gex_results ${{ steps.act.outputs.action }}
+
+      - name: Commit & push to results/gex
+        run: |
+          git config user.name "gex-results-bot"
+          git config user.email "bot@users.noreply.github.com"
+          # Drop borrowed develop files; keep only results/
+          git restore --staged --worktree -- \
+            paper_trading gex_scanner.py gex_params.py config requirements.txt \
+            2>/dev/null || true
+          mkdir -p results/gex
+          git add results/gex/scans results/gex/journal.csv || true
+          if git diff --staged --quiet; then
+            echo "No results changes"
+          else
+            git commit -m "gex results: ${{ steps.act.outputs.action }} $(date -u +%Y-%m-%dT%H%MZ)"
+            git push origin results/gex
+          fi

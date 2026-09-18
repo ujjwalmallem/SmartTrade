@@ -1,0 +1,57 @@
+# GEX scanner parameters (hand defaults = current live behavior).
+# optimize_gex.py can overwrite numeric fields after a search; review before promoting.
+# Never copy config/gex_params.suggested.yaml here without inspecting trade count, PF,
+# and hold-out behavior.
+
+version: "1.0.0"
+updated: "2026-09-18"
+
+# --- classify_setup thresholds ---
+oversold:
+  rsi_max: 35.0          # RSI < this + price >= EMA200 → OVERSOLD_BULL_PULLBACK
+  require_rsi_rising: false
+  base_score: 80.0
+  rsi_bonus_cap: 10.0    # base_score += min(rsi_max - rsi, rsi_bonus_cap)
+  hold_days: 5
+
+bear:
+  rsi_max: 40.0          # RSI < this + price < EMA200 + NEGATIVE_GEX
+  base_score: 75.0
+  rsi_bonus_cap: 10.0
+  hold_days: 1
+
+resistance:
+  rsi_min: 68.0          # near call wall + RSI > this → RESISTANCE_PINNED_SHORT_VOL
+  base_score: 60.0
+  rsi_bonus_cap: 10.0
+  hold_days: 1
+
+wall_pin:
+  base_score: 40.0
+  hold_days: 1
+
+# Call-wall proximity band (fraction of wall)
+wall_band:
+  below: 0.015           # price >= call_wall * (1 - below)
+  above: 0.020           # price <= call_wall * (1 + above)
+
+# Ranking
+ranking:
+  gex_weight: 9.0        # rank_score = base_score + gex_pct * gex_weight
+  min_rank_for_live: 0.0 # raise (e.g. 70) when taking live tickets
+  max_new_positions: 5
+
+# Live ticket hard filters (ticket helper / paper optional gates)
+# skip_wall_edge stays false so a WALL_EDGE flag does not skip live paper opens.
+filters:
+  require_earnings_data: true
+  skip_wall_edge: false
+  min_abs_gex_bps: 0.0   # e.g. 0.5 to ignore tiny GEX
+
+# Walls / chain
+walls:
+  max_dist: 0.12         # WALL_MAX_DIST_DEFAULT
+  min_oi: 5
+
+# Earnings blackout (days inclusive)
+earnings_blackout_days: 7
