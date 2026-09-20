@@ -1,0 +1,6 @@
+date,symbol,signal,rank_score,base_score,price,rsi,gex_1pct_m,gex_bps,regime,call_wall,put_wall,gamma_flip,call_wall_edge,put_wall_edge,has_earnings_data,stop_loss,target_price,hold_horizon,recommended_strategy,exit_price,exit_reason,pnl_usd,pnl_pct,fwd_1d_pct,fwd_5d_pct,logged_at
+2026-09-20,HOOD,WALL_PIN,49.0,40.0,119.82,60.0,30.56,2.8364,,120.0,110.0,102.82,False,False,True,123.41,120.42,1,Iron Condor / Short Volatility,,,,,,,2026-09-20T13:32:24.263811+00:00
+2026-09-20,AAPL,WALL_PIN,47.2,40.0,336.13,64.3,775.85,1.5816,,340.0,300.0,311.41,False,False,True,346.8,337.81,1,Iron Condor / Short Volatility,,,,,,,2026-09-20T13:32:24.263811+00:00
+2026-09-20,INTC,WALL_PIN,45.4,40.0,108.6,61.7,87.9,1.5312,,110.0,100.0,92.39,False,False,True,112.2,109.14,1,Iron Condor / Short Volatility,,,,,,,2026-09-20T13:32:24.263811+00:00
+2026-09-20,PLTR,WALL_PIN,43.6,40.0,177.64,57.0,27.37,0.6411,,180.0,170.0,171.42,False,False,True,183.6,178.53,1,Iron Condor / Short Volatility,,,,,,,2026-09-20T13:32:24.263811+00:00
+2026-09-20,ASML,WALL_PIN,41.8,40.0,1679.92,48.6,-17.48,-0.2709,,1700.0,1600.0,1723.68,False,False,True,1734.0,1688.32,1,Iron Condor / Short Volatility,,,,,,,2026-09-20T13:32:24.263811+00:00
