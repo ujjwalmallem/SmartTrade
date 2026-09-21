@@ -1,5 +1,6 @@
 {
-  "open": [
+  "open": [],
+  "closed": [
     {
       "symbol": "AMAT",
       "direction": "LONG",
@@ -11,10 +12,14 @@
       "size_usd": 1000.0,
       "stop_loss": 393.74,
       "target_price": 445.1,
-      "hold_days": 5
+      "hold_days": 5,
+      "exit_time": "2026-09-21T14:00:46.920822+00:00",
+      "exit_price": 454.785,
+      "exit_reason": "TARGET",
+      "pnl_usd": 62.63,
+      "pnl_pct": 6.26
     }
   ],
-  "closed": [],
   "scans": [
     {
       "date": "2026-09-14",
