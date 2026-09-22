@@ -7,3 +7,4 @@ date,symbol,signal,rank_score,base_score,price,rsi,gex_1pct_m,gex_bps,regime,cal
 2026-09-21,PLTR,WALL_PIN,49.0,40.0,179.43,57.0,294.26,6.8247,,180.0,170.0,178.41,False,False,True,184.81,180.32,1,Iron Condor / Short Volatility,,,,,,,2026-09-21T13:32:24.770425+00:00
 2026-09-21,META,WALL_PIN,44.5,40.0,696.13,65.8,569.16,3.2094,,700.0,640.0,693.86,False,False,True,717.01,699.61,1,Iron Condor / Short Volatility,,,,,,,2026-09-21T13:32:24.770425+00:00
 2026-09-15,AMAT,OVERSOLD_BULL_PULLBACK,,,427.98,,,,,,,,,,,393.74,445.1,5,,454.785,TARGET,62.63,6.26,,,2026-09-21T19:55:33.165192+00:00
+2026-09-22,PLTR,WALL_PIN,44.5,40.0,183.8,61.1,100.89,2.2843,,185.0,170.0,183.17,False,False,True,189.31,184.72,1,Iron Condor / Short Volatility,,,,,,,2026-09-22T13:32:42.573956+00:00
