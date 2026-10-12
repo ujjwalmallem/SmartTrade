@@ -1,19 +1,5 @@
 {
-  "open": [
-    {
-      "symbol": "IREN",
-      "direction": "SHORT",
-      "signal": "VOLATILITY_EXPANSION_BEAR",
-      "date": "2026-10-11",
-      "entry_time": "2026-10-11T13:32:51.572525+00:00",
-      "entry_price": 35.19,
-      "shares": 28.4172,
-      "size_usd": 1000.0,
-      "stop_loss": 38.48,
-      "target_price": 33.25,
-      "hold_days": 1
-    }
-  ],
+  "open": [],
   "closed": [
     {
       "symbol": "AMAT",
@@ -32,6 +18,24 @@
       "exit_reason": "TARGET",
       "pnl_usd": 62.63,
       "pnl_pct": 6.26
+    },
+    {
+      "symbol": "IREN",
+      "direction": "SHORT",
+      "signal": "VOLATILITY_EXPANSION_BEAR",
+      "date": "2026-10-11",
+      "entry_time": "2026-10-11T13:32:51.572525+00:00",
+      "entry_price": 35.19,
+      "shares": 28.4172,
+      "size_usd": 1000.0,
+      "stop_loss": 38.48,
+      "target_price": 33.25,
+      "hold_days": 1,
+      "exit_time": "2026-10-12T19:56:34.049407+00:00",
+      "exit_price": 34.925,
+      "exit_reason": "EOD",
+      "pnl_usd": 7.53,
+      "pnl_pct": 0.75
     }
   ],
   "scans": [
