@@ -40,19 +40,6 @@
       "hold_days": 1
     },
     {
-      "symbol": "MU",
-      "direction": "LONG",
-      "signal": "OVERSOLD_BULL_PULLBACK",
-      "date": "2026-10-18",
-      "entry_time": "2026-10-18T13:31:55.137623+00:00",
-      "entry_price": 878.84,
-      "shares": 1.1379,
-      "size_usd": 1000.0,
-      "stop_loss": 808.53,
-      "target_price": 913.99,
-      "hold_days": 5
-    },
-    {
       "symbol": "ORCL",
       "direction": "SHORT",
       "signal": "VOLATILITY_EXPANSION_BEAR",
@@ -156,6 +143,24 @@
       "exit_reason": "TARGET",
       "pnl_usd": 42.16,
       "pnl_pct": 4.22
+    },
+    {
+      "symbol": "MU",
+      "direction": "LONG",
+      "signal": "OVERSOLD_BULL_PULLBACK",
+      "date": "2026-10-18",
+      "entry_time": "2026-10-18T13:31:55.137623+00:00",
+      "entry_price": 878.84,
+      "shares": 1.1379,
+      "size_usd": 1000.0,
+      "stop_loss": 808.53,
+      "target_price": 913.99,
+      "hold_days": 5,
+      "exit_time": "2026-10-19T14:30:36.752192+00:00",
+      "exit_price": 915.545,
+      "exit_reason": "TARGET",
+      "pnl_usd": 41.77,
+      "pnl_pct": 4.18
     }
   ],
   "scans": [
