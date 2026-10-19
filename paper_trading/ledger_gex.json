@@ -27,19 +27,6 @@
       "hold_days": 1
     },
     {
-      "symbol": "INTC",
-      "direction": "LONG",
-      "signal": "OVERSOLD_BULL_PULLBACK",
-      "date": "2026-10-18",
-      "entry_time": "2026-10-18T13:31:55.137510+00:00",
-      "entry_price": 89.85,
-      "shares": 11.1297,
-      "size_usd": 1000.0,
-      "stop_loss": 83.3,
-      "target_price": 93.44,
-      "hold_days": 5
-    },
-    {
       "symbol": "HOOD",
       "direction": "SHORT",
       "signal": "VOLATILITY_EXPANSION_BEAR",
@@ -151,6 +138,24 @@
       "exit_reason": "EOD",
       "pnl_usd": 75.73,
       "pnl_pct": 7.57
+    },
+    {
+      "symbol": "INTC",
+      "direction": "LONG",
+      "signal": "OVERSOLD_BULL_PULLBACK",
+      "date": "2026-10-18",
+      "entry_time": "2026-10-18T13:31:55.137510+00:00",
+      "entry_price": 89.85,
+      "shares": 11.1297,
+      "size_usd": 1000.0,
+      "stop_loss": 83.3,
+      "target_price": 93.44,
+      "hold_days": 5,
+      "exit_time": "2026-10-19T14:00:36.625261+00:00",
+      "exit_price": 93.6382,
+      "exit_reason": "TARGET",
+      "pnl_usd": 42.16,
+      "pnl_pct": 4.22
     }
   ],
   "scans": [
