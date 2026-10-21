@@ -12,19 +12,6 @@
       "stop_loss": 88.2,
       "target_price": 97.47,
       "hold_days": 5
-    },
-    {
-      "symbol": "IREN",
-      "direction": "SHORT",
-      "signal": "VOLATILITY_EXPANSION_BEAR",
-      "date": "2026-10-21",
-      "entry_time": "2026-10-21T13:31:59.716397+00:00",
-      "entry_price": 28.05,
-      "shares": 35.6506,
-      "size_usd": 1000.0,
-      "stop_loss": 29.42,
-      "target_price": 23.84,
-      "hold_days": 1
     }
   ],
   "closed": [
@@ -243,6 +230,24 @@
       "exit_reason": "TARGET",
       "pnl_usd": 41.09,
       "pnl_pct": 4.11
+    },
+    {
+      "symbol": "IREN",
+      "direction": "SHORT",
+      "signal": "VOLATILITY_EXPANSION_BEAR",
+      "date": "2026-10-21",
+      "entry_time": "2026-10-21T13:31:59.716397+00:00",
+      "entry_price": 28.05,
+      "shares": 35.6506,
+      "size_usd": 1000.0,
+      "stop_loss": 29.42,
+      "target_price": 23.84,
+      "hold_days": 1,
+      "exit_time": "2026-10-21T19:55:37.144181+00:00",
+      "exit_price": 27.865,
+      "exit_reason": "EOD",
+      "pnl_usd": 6.6,
+      "pnl_pct": 0.66
     }
   ],
   "scans": [
