@@ -1,32 +1,5 @@
 {
-  "open": [
-    {
-      "symbol": "HOOD",
-      "direction": "SHORT",
-      "signal": "VOLATILITY_EXPANSION_BEAR",
-      "date": "2026-10-29",
-      "entry_time": "2026-10-29T13:32:39.670335+00:00",
-      "entry_price": 89.98,
-      "shares": 11.1136,
-      "size_usd": 1000.0,
-      "stop_loss": 92.68,
-      "target_price": 80.75,
-      "hold_days": 1
-    },
-    {
-      "symbol": "GOOGL",
-      "direction": "SHORT",
-      "signal": "VOLATILITY_EXPANSION_BEAR",
-      "date": "2026-10-29",
-      "entry_time": "2026-10-29T13:32:39.670428+00:00",
-      "entry_price": 283.31,
-      "shares": 3.5297,
-      "size_usd": 1000.0,
-      "stop_loss": 305.97,
-      "target_price": 261.25,
-      "hold_days": 1
-    }
-  ],
+  "open": [],
   "closed": [
     {
       "symbol": "AMAT",
@@ -441,6 +414,42 @@
       "exit_reason": "EOD",
       "pnl_usd": -50.98,
       "pnl_pct": -5.1
+    },
+    {
+      "symbol": "HOOD",
+      "direction": "SHORT",
+      "signal": "VOLATILITY_EXPANSION_BEAR",
+      "date": "2026-10-29",
+      "entry_time": "2026-10-29T13:32:39.670335+00:00",
+      "entry_price": 89.98,
+      "shares": 11.1136,
+      "size_usd": 1000.0,
+      "stop_loss": 92.68,
+      "target_price": 80.75,
+      "hold_days": 1,
+      "exit_time": "2026-10-29T19:56:10.732433+00:00",
+      "exit_price": 91.35,
+      "exit_reason": "EOD",
+      "pnl_usd": -15.23,
+      "pnl_pct": -1.52
+    },
+    {
+      "symbol": "GOOGL",
+      "direction": "SHORT",
+      "signal": "VOLATILITY_EXPANSION_BEAR",
+      "date": "2026-10-29",
+      "entry_time": "2026-10-29T13:32:39.670428+00:00",
+      "entry_price": 283.31,
+      "shares": 3.5297,
+      "size_usd": 1000.0,
+      "stop_loss": 305.97,
+      "target_price": 261.25,
+      "hold_days": 1,
+      "exit_time": "2026-10-29T19:56:10.893659+00:00",
+      "exit_price": 283.66,
+      "exit_reason": "EOD",
+      "pnl_usd": -1.24,
+      "pnl_pct": -0.12
     }
   ],
   "scans": [
