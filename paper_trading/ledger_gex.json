@@ -1,19 +1,6 @@
 {
   "open": [
     {
-      "symbol": "PLTR",
-      "direction": "LONG",
-      "signal": "OVERSOLD_BULL_PULLBACK",
-      "date": "2026-11-05",
-      "entry_time": "2026-11-05T13:32:45.135601+00:00",
-      "entry_price": 171.7,
-      "shares": 5.8241,
-      "size_usd": 1000.0,
-      "stop_loss": 157.96,
-      "target_price": 178.57,
-      "hold_days": 5
-    },
-    {
       "symbol": "NVDA",
       "direction": "SHORT",
       "signal": "VOLATILITY_EXPANSION_BEAR",
@@ -675,6 +662,24 @@
       "exit_reason": "STOP",
       "pnl_usd": -48.1,
       "pnl_pct": -4.81
+    },
+    {
+      "symbol": "PLTR",
+      "direction": "LONG",
+      "signal": "OVERSOLD_BULL_PULLBACK",
+      "date": "2026-11-05",
+      "entry_time": "2026-11-05T13:32:45.135601+00:00",
+      "entry_price": 171.7,
+      "shares": 5.8241,
+      "size_usd": 1000.0,
+      "stop_loss": 157.96,
+      "target_price": 178.57,
+      "hold_days": 5,
+      "exit_time": "2026-11-05T15:00:55.935222+00:00",
+      "exit_price": 157.715,
+      "exit_reason": "STOP",
+      "pnl_usd": -81.45,
+      "pnl_pct": -8.15
     }
   ],
   "scans": [
