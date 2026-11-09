@@ -79,19 +79,6 @@
       "hold_days": 1
     },
     {
-      "symbol": "META",
-      "direction": "SHORT",
-      "signal": "VOLATILITY_EXPANSION_BEAR",
-      "date": "2026-11-09",
-      "entry_time": "2026-11-09T13:32:36.841783+00:00",
-      "entry_price": 610.15,
-      "shares": 1.6389,
-      "size_usd": 1000.0,
-      "stop_loss": 628.45,
-      "target_price": 570.0,
-      "hold_days": 1
-    },
-    {
       "symbol": "ORCL",
       "direction": "SHORT",
       "signal": "VOLATILITY_EXPANSION_BEAR",
@@ -789,6 +776,24 @@
       "exit_reason": "TARGET",
       "pnl_usd": 69.26,
       "pnl_pct": 6.93
+    },
+    {
+      "symbol": "META",
+      "direction": "SHORT",
+      "signal": "VOLATILITY_EXPANSION_BEAR",
+      "date": "2026-11-09",
+      "entry_time": "2026-11-09T13:32:36.841783+00:00",
+      "entry_price": 610.15,
+      "shares": 1.6389,
+      "size_usd": 1000.0,
+      "stop_loss": 628.45,
+      "target_price": 570.0,
+      "hold_days": 1,
+      "exit_time": "2026-11-09T14:30:57.616283+00:00",
+      "exit_price": 632.6,
+      "exit_reason": "STOP",
+      "pnl_usd": -36.79,
+      "pnl_pct": -3.68
     }
   ],
   "scans": [
