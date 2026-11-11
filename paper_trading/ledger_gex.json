@@ -25,19 +25,6 @@
       "stop_loss": 125.74,
       "target_price": 104.5,
       "hold_days": 1
-    },
-    {
-      "symbol": "COIN",
-      "direction": "SHORT",
-      "signal": "VOLATILITY_EXPANSION_BEAR",
-      "date": "2026-11-11",
-      "entry_time": "2026-11-11T13:32:28.559938+00:00",
-      "entry_price": 132.13,
-      "shares": 7.5683,
-      "size_usd": 1000.0,
-      "stop_loss": 137.33,
-      "target_price": 114.0,
-      "hold_days": 1
     }
   ],
   "closed": [
@@ -958,6 +945,24 @@
       "exit_reason": "STOP",
       "pnl_usd": -34.86,
       "pnl_pct": -3.49
+    },
+    {
+      "symbol": "COIN",
+      "direction": "SHORT",
+      "signal": "VOLATILITY_EXPANSION_BEAR",
+      "date": "2026-11-11",
+      "entry_time": "2026-11-11T13:32:28.559938+00:00",
+      "entry_price": 132.13,
+      "shares": 7.5683,
+      "size_usd": 1000.0,
+      "stop_loss": 137.33,
+      "target_price": 114.0,
+      "hold_days": 1,
+      "exit_time": "2026-11-11T16:01:02.143589+00:00",
+      "exit_price": 137.35,
+      "exit_reason": "STOP",
+      "pnl_usd": -39.51,
+      "pnl_pct": -3.95
     }
   ],
   "scans": [
