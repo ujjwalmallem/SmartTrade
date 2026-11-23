@@ -1,19 +1,5 @@
 {
-  "open": [
-    {
-      "symbol": "META",
-      "direction": "SHORT",
-      "signal": "VOLATILITY_EXPANSION_BEAR",
-      "date": "2026-11-22",
-      "entry_time": "2026-11-22T13:32:54.247020+00:00",
-      "entry_price": 560.84,
-      "shares": 1.783,
-      "size_usd": 1000.0,
-      "stop_loss": 605.71,
-      "target_price": 476.71,
-      "hold_days": 1
-    }
-  ],
+  "open": [],
   "closed": [
     {
       "symbol": "AMAT",
@@ -1454,6 +1440,24 @@
       "exit_reason": "STOP",
       "pnl_usd": -144.88,
       "pnl_pct": -14.49
+    },
+    {
+      "symbol": "META",
+      "direction": "SHORT",
+      "signal": "VOLATILITY_EXPANSION_BEAR",
+      "date": "2026-11-22",
+      "entry_time": "2026-11-22T13:32:54.247020+00:00",
+      "entry_price": 560.84,
+      "shares": 1.783,
+      "size_usd": 1000.0,
+      "stop_loss": 605.71,
+      "target_price": 476.71,
+      "hold_days": 1,
+      "exit_time": "2026-11-23T19:56:15.870430+00:00",
+      "exit_price": 598.22,
+      "exit_reason": "EOD",
+      "pnl_usd": -66.65,
+      "pnl_pct": -6.67
     }
   ],
   "scans": [
