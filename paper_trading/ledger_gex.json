@@ -1,19 +1,5 @@
 {
-  "open": [
-    {
-      "symbol": "AMD",
-      "direction": "SHORT",
-      "signal": "VOLATILITY_EXPANSION_BEAR",
-      "date": "2026-11-25",
-      "entry_time": "2026-11-25T13:32:23.950771+00:00",
-      "entry_price": 413.27,
-      "shares": 2.4197,
-      "size_usd": 1000.0,
-      "stop_loss": 433.93,
-      "target_price": 380.0,
-      "hold_days": 1
-    }
-  ],
+  "open": [],
   "closed": [
     {
       "symbol": "AMAT",
@@ -1472,6 +1458,24 @@
       "exit_reason": "EOD",
       "pnl_usd": -66.65,
       "pnl_pct": -6.67
+    },
+    {
+      "symbol": "AMD",
+      "direction": "SHORT",
+      "signal": "VOLATILITY_EXPANSION_BEAR",
+      "date": "2026-11-25",
+      "entry_time": "2026-11-25T13:32:23.950771+00:00",
+      "entry_price": 413.27,
+      "shares": 2.4197,
+      "size_usd": 1000.0,
+      "stop_loss": 433.93,
+      "target_price": 380.0,
+      "hold_days": 1,
+      "exit_time": "2026-11-25T15:31:02.720935+00:00",
+      "exit_price": 375.99,
+      "exit_reason": "TARGET",
+      "pnl_usd": 90.21,
+      "pnl_pct": 9.02
     }
   ],
   "scans": [
